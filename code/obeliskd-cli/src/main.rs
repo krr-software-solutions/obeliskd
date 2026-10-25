@@ -90,7 +90,9 @@ async fn main_impl() -> Result<(), ObeliskdError> {
     }
 }
 
-#[tokio::main]
+// Not one worker per core (tokio's default): DNS is a single receive loop and the control API sees a
+// handful of requests, so a few workers is plenty, and each one costs a stack and an allocator arena.
+#[tokio::main(worker_threads = 4)]
 async fn main() -> ExitCode {
     match main_impl().await {
         Ok(()) => ExitCode::SUCCESS,
