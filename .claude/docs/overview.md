@@ -7,7 +7,7 @@ understanding the wire format over pulling in a DNS framework.
 
 ## Current state
 
-Scaffolding only: `obeliskd` calls `obeliskd_lib::print_hello()`. No networking yet.
+Scaffolding only: the `obeliskd` binary calls `obeliskd::print_hello()`. No networking yet.
 
 ## First milestone
 

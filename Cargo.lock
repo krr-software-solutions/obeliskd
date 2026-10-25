@@ -5,10 +5,10 @@ version = 4
 [[package]]
 name = "obeliskd"
 version = "0.0.0"
-dependencies = [
- "obeliskd-lib",
-]
 
 [[package]]
-name = "obeliskd-lib"
+name = "obeliskd-cli"
 version = "0.0.0"
+dependencies = [
+ "obeliskd",
+]

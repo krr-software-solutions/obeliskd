@@ -14,16 +14,16 @@ under `.test`) and stays out of the way for everything else.
 
 ## Layout
 
-| Path                | Crate          | What                     |
-|---------------------|----------------|--------------------------|
-| `code/obeliskd`     | `obeliskd`     | the daemon (binary)      |
-| `code/obeliskd-lib` | `obeliskd-lib` | the library it builds on |
+| Path                | Crate          | What                                  |
+|---------------------|----------------|---------------------------------------|
+| `code/obeliskd`     | `obeliskd`     | the library                           |
+| `code/obeliskd-cli` | `obeliskd-cli` | the CLI / daemon (binary: `obeliskd`) |
 
 ## Building
 
 ```sh
 cargo build
-cargo run -p obeliskd
+cargo run -p obeliskd-cli
 cargo test --workspace
 ```
 

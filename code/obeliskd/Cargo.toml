@@ -1,6 +1,6 @@
 [package]
 name = "obeliskd"
-description = "The obeliskd daemon"
+description = "A small, hand-written DNS server: the library"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,12 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
 
-[[bin]]
-name = "obeliskd"
-path = "src/main.rs"
-
 [dependencies]
-obeliskd-lib.workspace = true
 
 [lints]
 workspace = true

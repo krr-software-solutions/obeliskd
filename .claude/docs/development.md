@@ -3,7 +3,7 @@
 ## Commands
 
 ```sh
-cargo run -p obeliskd                                        # run the daemon
+cargo run -p obeliskd-cli                                    # run the daemon
 cargo fmt --all                                              # format
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
@@ -20,7 +20,7 @@ MR pipelines only, for now. Jobs come from the shared templates in `krrss/util/p
 |-------------------|--------|----------------------------------------------------------------|
 | `check-pre-merge` | auto   | fails if a `FIX-PRE-MERGE` marker is left anywhere (see below) |
 | `check`           | auto   | fmt, clippy (`-D warnings`), tests                             |
-| `build: [target]` | manual | cross-builds `obeliskd` with cargo-zigbuild (Linux musl, macOS) |
+| `build: [target]` | manual | cross-builds the `obeliskd` binary with cargo-zigbuild (Linux musl, macOS) |
 
 No release, image, or publish jobs yet.
 

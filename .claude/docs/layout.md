@@ -2,12 +2,15 @@
 
 A Cargo workspace; every crate lives under `code/`.
 
-| Path                | Crate          | Kind | Role                                      |
-|---------------------|----------------|------|-------------------------------------------|
-| `code/obeliskd`     | `obeliskd`     | bin  | the daemon: wiring and startup only       |
-| `code/obeliskd-lib` | `obeliskd-lib` | lib  | everything else: protocol, rules, logic   |
+| Path                | Crate          | Kind                 | Role                                    |
+|---------------------|----------------|----------------------|-----------------------------------------|
+| `code/obeliskd`     | `obeliskd`     | lib                  | everything: protocol, rules, logic      |
+| `code/obeliskd-cli` | `obeliskd-cli` | bin (named `obeliskd`) | the CLI / daemon: wiring and startup only |
 
-Keep the binary thin. Logic goes in `obeliskd-lib`, where it can be tested.
+Keep the binary thin. Logic goes in the `obeliskd` library, where it can be tested.
+
+The binary is named `obeliskd` too (`[[bin]] name`), so it sets `doc = false`: otherwise
+`cargo doc` writes both to `target/doc/obeliskd` and one clobbers the other.
 
 ## Shared settings
 
@@ -23,7 +26,7 @@ The root `Cargo.toml` owns everything shared:
 ## Adding a crate
 
 1. Create `code/<name>/` with `Cargo.toml` inheriting the workspace package fields and lints
-   (copy `code/obeliskd-lib/Cargo.toml`).
+   (copy `code/obeliskd/Cargo.toml`).
 2. Add it to `members` in the root `Cargo.toml`.
 3. If other crates use it, add it to `[workspace.dependencies]` with a `path` and `version = "=0.0.0"`.
 

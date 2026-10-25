@@ -84,7 +84,7 @@ build:
     - rustup toolchain install stable --profile minimal --no-self-update
     - rustup default stable
     - rustup target add "$TARGET"
-    - cargo zigbuild --release --locked -p obeliskd --target "$TARGET"
+    - cargo zigbuild --release --locked -p obeliskd-cli --target "$TARGET"
     - mkdir -p "dist/$TARGET"
     - cp "target/$TARGET/release/obeliskd" "dist/$TARGET/"
   artifacts:
