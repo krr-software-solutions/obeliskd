@@ -4,6 +4,7 @@
 
 ```sh
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock daemon run     # run the daemon, no root needed
+#   add --dns-address 127.0.0.79:5353 to stay off port 53, which needs root (once DNS is served)
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock daemon health  # call it
 cargo run -p obeliskd-cli -- completions zsh                 # shell completions
 cargo fmt --all                                              # format

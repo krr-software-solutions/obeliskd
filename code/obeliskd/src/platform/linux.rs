@@ -1,4 +1,5 @@
 use std::io;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
 use tokio::net::{UnixListener, UnixStream};
@@ -18,6 +19,10 @@ impl PlatformImpl for Linux {
 
     fn state_dir() -> PathBuf {
         PathBuf::from("/var/lib/obeliskd")
+    }
+
+    fn default_dns_address() -> SocketAddrV4 {
+        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 79), 53)
     }
 
     fn control_socket_path() -> PathBuf {

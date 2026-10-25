@@ -12,7 +12,7 @@ The control socket works end to end: `obeliskd daemon run` serves the control AP
 
 ## First milestone
 
-Linux-only UDP server on `127.0.0.1:5353` with one hardcoded rule:
+Linux-only UDP server on `127.0.0.79:53` with one hardcoded rule:
 
 - answers `A` for the rule;
 - answers `AAAA` with an empty `NOERROR` (not `NXDOMAIN`, which breaks some clients);
@@ -46,3 +46,16 @@ don't add flags or files that expect a person to edit config.
 - **Control socket:** one socket. The daemon checks the caller's kernel-verified uid
   (`peer_cred()`) before reading anything. Access starts root-only (so `sudo` works) and is widened
   through the CLI.
+
+## DNS address
+
+The daemon answers DNS on `--dns-address` (`OBELISKD_DNS_ADDRESS`). The default is
+`127.0.0.79:53`, chosen because nothing else is known to use it:
+
+- `.53` and `.54` belong to systemd-resolved, `.11` to Docker's DNS, and `127.0.1.1` to Debian's
+  hostname entry.
+- Avoid `.35`: other DIY DNS proxies pick it as "53 backwards".
+
+On macOS only `127.0.0.1` exists on `lo0` by default, so `.79` needs `ifconfig lo0 alias 127.0.0.79`
+(root, and lost on reboot). Setup (`obeliskd install`) will have to add the alias and make it
+persist.

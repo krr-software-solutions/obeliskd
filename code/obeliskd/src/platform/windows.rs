@@ -3,6 +3,7 @@
 compile_error!("obeliskd doesn't support Windows yet");
 
 use std::io;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
 use tokio::net::{TcpListener, TcpStream};
@@ -27,6 +28,10 @@ impl PlatformImpl for Windows {
         let program_data =
             std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into());
         PathBuf::from(program_data).join("obeliskd")
+    }
+
+    fn default_dns_address() -> SocketAddrV4 {
+        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 79), 53)
     }
 
     fn control_socket_path() -> PathBuf {

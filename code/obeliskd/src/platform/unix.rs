@@ -82,6 +82,7 @@ mod tests {
     use crate::control::api::DaemonInfo;
     use crate::control::client::ControlClient;
     use crate::control::server::serve;
+    use crate::{Platform, PlatformImpl};
 
     #[tokio::test]
     async fn health_round_trip_over_a_real_socket() {
@@ -89,6 +90,7 @@ mod tests {
         let socket = dir.path().join("obeliskd.sock");
         let daemon = DaemonInfo {
             started_at: jiff::Timestamp::now(),
+            dns_address: Platform::default_dns_address(),
         };
 
         let listener = bind_control(&socket).unwrap();

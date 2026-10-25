@@ -5,6 +5,7 @@
 //! (`Platform::name()`), never `&dyn`: the calls are static and other OSes' code isn't compiled.
 
 use std::io;
+use std::net::SocketAddrV4;
 use std::path::{Path, PathBuf};
 
 use axum::serve::Listener;
@@ -27,6 +28,9 @@ pub trait PlatformImpl {
     ///
     /// The daemon owns it; nothing in it is edited by hand.
     fn state_dir() -> PathBuf;
+
+    /// Where the daemon answers DNS, unless told otherwise.
+    fn default_dns_address() -> SocketAddrV4;
 
     /// Where the daemon listens for control connections, unless told otherwise.
     fn control_socket_path() -> PathBuf;

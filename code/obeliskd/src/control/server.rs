@@ -1,5 +1,6 @@
 //! The daemon's side of the control API.
 
+use std::net::SocketAddrV4;
 use std::path::Path;
 
 use axum::extract::connect_info::Connected;
@@ -111,15 +112,19 @@ where
 
 /// Runs the daemon: binds the control socket at `socket` and serves it until a shutdown signal.
 ///
+/// `dns_address` is where it will answer DNS (not served yet).
+///
 /// # Errors
 ///
 /// If the socket can't be bound, or the server fails.
-pub async fn run(socket: &Path) -> Result<(), ObeliskdError> {
+pub async fn run(socket: &Path, dns_address: SocketAddrV4) -> Result<(), ObeliskdError> {
     let listener = Platform::bind_control(socket)?;
     let daemon = DaemonInfo {
         started_at: Timestamp::now(),
+        dns_address,
     };
-    eprintln!("obeliskd: listening on {}", socket.display());
+    eprintln!("obeliskd: control socket at {}", socket.display());
+    eprintln!("obeliskd: DNS address {dns_address} (not served yet)");
 
     let result = serve(listener, daemon, Platform::shutdown_signal()).await;
     Platform::unbind_control(socket);
@@ -161,6 +166,7 @@ mod tests {
     fn started_at() -> DaemonInfo {
         DaemonInfo {
             started_at: "2026-10-25T12:00:00Z".parse().unwrap(),
+            dns_address: "127.0.0.79:53".parse().unwrap(),
         }
     }
 
@@ -173,7 +179,7 @@ mod tests {
             body,
             serde_json::json!({
                 "caller": { "uid": 1000, "gid": 1000, "pid": null },
-                "daemon": { "startedAt": "2026-10-25T12:00:00Z" },
+                "daemon": { "startedAt": "2026-10-25T12:00:00Z", "dnsAddress": "127.0.0.79:53" },
             })
         );
     }

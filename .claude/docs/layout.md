@@ -75,7 +75,8 @@ Lives in `code/obeliskd/src/platform/`:
   builds fail. To start supporting it, delete that line and re-add the Windows `check-target` job.
 - Any other OS hits `compile_error!`.
 
-`PlatformImpl` holds only the OS-specific edges: paths (`state_dir`, `control_socket_path`), the
+`PlatformImpl` holds only the OS-specific edges: paths and defaults (`state_dir`,
+`control_socket_path`, `default_dns_address`), the
 control socket's transport (`type ControlListener`, `bind_control`, `unbind_control`,
 `control_client`), who is calling (`peer`), and `shutdown_signal`. The API, auth, and state on top
 of those are shared code.

@@ -1,5 +1,7 @@
 //! The control API's wire types, shared by the server and the client.
 
+use std::net::SocketAddrV4;
+
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +19,8 @@ pub struct Health {
 #[serde(rename_all = "camelCase")]
 pub struct DaemonInfo {
     pub started_at: Timestamp,
+    /// Where the daemon answers DNS.
+    pub dns_address: SocketAddrV4,
 }
 
 /// The body of every non-2xx response.
