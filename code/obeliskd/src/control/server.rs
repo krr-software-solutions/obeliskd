@@ -1,8 +1,5 @@
 //! The daemon's side of the control API.
 
-use std::net::SocketAddrV4;
-use std::path::Path;
-
 use axum::extract::connect_info::Connected;
 use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
@@ -10,7 +7,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::serve::{IncomingStream, Listener};
 use axum::{Json, Router};
-use jiff::Timestamp;
 
 use super::Peer;
 use super::api::{DaemonInfo, ErrorBody, Health};
@@ -108,28 +104,6 @@ where
     .with_graceful_shutdown(shutdown)
     .await
     .map_err(ObeliskdError::ControlServe)
-}
-
-/// Runs the daemon: binds the control socket at `socket` and serves it until a shutdown signal.
-///
-/// `dns_address` is where it will answer DNS (not served yet).
-///
-/// # Errors
-///
-/// If the socket can't be bound, or the server fails.
-pub async fn run(socket: &Path, dns_address: SocketAddrV4) -> Result<(), ObeliskdError> {
-    let listener = Platform::bind_control(socket)?;
-    let daemon = DaemonInfo {
-        started_at: Timestamp::now(),
-        dns_address,
-    };
-    eprintln!("obeliskd: control socket at {}", socket.display());
-    eprintln!("obeliskd: DNS address {dns_address} (not served yet)");
-
-    let result = serve(listener, daemon, Platform::shutdown_signal()).await;
-    Platform::unbind_control(socket);
-    eprintln!("obeliskd: stopped");
-    result
 }
 
 #[cfg(test)]

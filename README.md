@@ -1,9 +1,9 @@
 # obeliskd
 
-A small, hand-written DNS server in Rust. It answers a handful of local rules itself (e.g. names
-under `.test`) and stays out of the way for everything else.
+A small, hand-written DNS server in Rust. It answers for `*.obd.internal`, and the OS routes only
+that suffix to it.
 
-> **Status:** early scaffolding. Running it prints a greeting; no DNS yet.
+> **Status:** early. It answers `*.obd.internal` A queries with a placeholder address; rules come next.
 
 ## Goals
 

@@ -1,37 +1,56 @@
 # Overview
 
-obeliskd is a small DNS server written by hand in Rust. It answers a few exact-match rules itself
-(e.g. `my.nested.test → 127.0.0.1`), and either forwards everything else upstream or only ever sees
-the suffixes the OS routes to it. Hand-rolling the protocol is part of the point: prefer
+obeliskd is a small DNS server written by hand in Rust. It answers for one zone,
+**`obd.internal`** (`*.obd.internal`), and the OS routes only that suffix to it. Hand-rolling the protocol is part of the point: prefer
 understanding the wire format over pulling in a DNS framework.
 
 ## Current state
 
-The control socket works end to end: `obeliskd daemon run` serves the control API (just
-`GET /health` so far), and `obeliskd daemon health` calls it. No DNS yet.
+`obeliskd daemon run` answers DNS for `*.obd.internal` over UDP (every name answers with a placeholder
+address), and serves the control API on its socket (just `GET /health` so far, which
+`obeliskd daemon health` calls). There are no rules yet, no TCP, no IPv6, and no OS routing setup.
 
-## First milestone
+## The zone and its answers (`code/obeliskd/src/dns/`)
 
-Linux-only UDP server on `127.0.0.79:53` with one hardcoded rule:
+The zone is `obd.internal` (`dns::ZONE`). `.internal` is reserved for private use (ICANN, 2024), so
+no public name can collide with it. Names are matched case-insensitively and echoed in their
+original case.
 
-- answers `A` for the rule;
-- answers `AAAA` with an empty `NOERROR` (not `NXDOMAIN`, which breaks some clients);
-- everything else: forward upstream, or `REFUSED` if it ends up answer-only.
+| Query | Response |
+|---|---|
+| `*.obd.internal`, type A | `NOERROR`, AA, one A record: the DNS listening address (**placeholder**, a TODO until rules exist), TTL 60 |
+| `*.obd.internal`, other types; `obd.internal` itself | `NOERROR`, AA, no answers. Never `NXDOMAIN`: the name exists, just not with that type |
+| anything outside the zone | `REFUSED`: not our zone. Never `NXDOMAIN`, which resolvers would cache as "doesn't exist" |
+| not a standard query / malformed | `NOTIMP` / `FORMERR` |
+| a response, or < 12 bytes | dropped |
 
-Wire it up via a systemd-resolved routing domain (`~test`, default-route off) and verify with
-`resolvectl query` and `curl`.
+The wire format is hand-rolled (`dns/wire.rs`, RFC 1035): just enough to read one question and
+write one answer. Queries carrying EDNS (systemd-resolved sends them) are answered without an OPT
+record, which RFC 6891 allows.
+
+To route the zone to obeliskd on Linux (by hand for now; `obeliskd install` should do it later):
+
+```sh
+sudo ip link add obd0 type dummy && sudo ip link set obd0 up
+sudo resolvectl dns obd0 127.0.0.79:53
+sudo resolvectl domain obd0 '~obd.internal'
+sudo resolvectl default-route obd0 false
+resolvectl query anything.obd.internal
+```
 
 ## Open design questions
 
 Nothing below is decided. Don't silently pick an answer in code; raise it.
 
-- Answer-only (OS routing domains) vs a full forwarder, or both.
-- Hand-rolled wire format vs `hickory-proto` (leaning hand-rolled).
-- One control socket with peer-credential (uid) checks vs two sockets split by file permissions.
-- Rule format and storage (static file, in-memory with live edits, persistence).
-- When to add a TCP listener (needed for truncated replies if forwarding).
+- Rule format and storage (in-memory with live edits, persisted in the state dir).
+- When to add TCP (needed once an answer can be truncated) and IPv6 (AAAA answers, `[::]` listening).
 - Cert helpers in v1? Name-constrained local CA vs ACME DNS-01 on an owned domain.
-- Whether obeliskd installs the OS routing itself or documents it as manual setup.
+- How `obeliskd install` sets up OS routing (leaning: it does it itself, via `PlatformImpl`).
+
+Settled so far:
+- **Answer-only**, behind an OS routing domain (no forwarding).
+- **Hand-rolled** wire format.
+- **One control socket**, authorizing callers by their peer credentials.
 
 These are tracked in the Aletheia knowledge graph under component `OBLSK:obeliskd`.
 

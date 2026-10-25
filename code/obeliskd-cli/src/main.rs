@@ -56,7 +56,7 @@ enum DaemonCommand {
 //
 
 async fn command_daemon_run(socket: &Path, dns_address: SocketAddrV4) -> Result<(), ObeliskdError> {
-    obeliskd::control::server::run(socket, dns_address).await
+    obeliskd::daemon::run(socket, dns_address).await
 }
 
 async fn command_daemon_health(socket: &Path) -> Result<(), ObeliskdError> {

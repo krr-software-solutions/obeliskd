@@ -1,3 +1,4 @@
+use std::net::SocketAddrV4;
 use std::path::PathBuf;
 
 /// Every error obeliskd can fail with.
@@ -18,6 +19,12 @@ pub enum ObeliskdError {
         source: std::io::Error,
     },
 
+    #[error("failed to bind DNS on {address}: {source}{}", bind_hint(source))]
+    DnsBind {
+        address: SocketAddrV4,
+        source: std::io::Error,
+    },
+
     #[error("control server failed: {0}")]
     ControlServe(std::io::Error),
 
@@ -35,4 +42,13 @@ pub enum ObeliskdError {
 
     #[error("bad response from the daemon: {0}")]
     ControlDecode(reqwest::Error),
+}
+
+fn bind_hint(source: &std::io::Error) -> &'static str {
+    match source.kind() {
+        std::io::ErrorKind::PermissionDenied => {
+            " (ports below 1024 need root; for development, try --dns-address 127.0.0.79:5379)"
+        }
+        _ => "",
+    }
 }

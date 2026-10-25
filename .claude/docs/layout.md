@@ -9,6 +9,15 @@ A Cargo workspace; every crate lives under `code/`.
 
 Keep the binary thin. Logic goes in the `obeliskd` library, where it can be tested.
 
+## The daemon (`code/obeliskd/src/daemon.rs`)
+
+`daemon::run` binds DNS first (the likeliest to fail: port 53 needs root), then the control
+socket, and serves both until the shutdown signal.
+
+- DNS lives in `dns/`: `wire.rs` is the protocol, and `mod.rs` holds the zone policy (`respond`, a
+  pure function from packet to packet, which is what the tests target) and the UDP loop.
+- The control API lives in `control/`.
+
 ## The control API (`code/obeliskd/src/control/`)
 
 HTTP over the control socket: the daemon serves it with axum, and the CLI calls it with reqwest.
