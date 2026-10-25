@@ -3,6 +3,7 @@
 # An MR runs:
 #   test   check-pre-merge       no fix-before-merge markers left behind
 #          check                 fmt, clippy, tests
+#          check-target: [<t>]   clippy for the other OSes, so their platform code compiles
 #   build  build: [<target>]     the `obeliskd` binary per target (cargo-zigbuild, all from Linux); manual
 workflow:
   rules:
@@ -61,6 +62,24 @@ check:
     - cargo fmt --all --check
     - cargo clippy --workspace --all-targets --locked -- -D warnings
     - cargo test --workspace --locked
+
+# Clippy for each non-Linux OS (`check` covers Linux), so platform code that this pipeline doesn't
+# otherwise build still compiles. Checking needs only the target's std, no linker.
+check-target:
+  extends:
+    - .runner
+    - .rust
+    - ".mr=auto,tag=never"
+  stage: test
+  parallel:
+    matrix:
+      - TARGET:
+          - aarch64-apple-darwin
+          - x86_64-pc-windows-gnu
+  script:
+    - rustup component add clippy
+    - rustup target add "$TARGET"
+    - cargo clippy --workspace --all-targets --locked --target "$TARGET" -- -D warnings
 
 # ----- build -----
 

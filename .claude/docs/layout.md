@@ -44,7 +44,18 @@ The root `Cargo.toml` owns everything shared:
 
 ## Platform-specific code
 
-When it arrives: a trait for the contract, a unit struct per OS, and a `#[cfg(target_os = ...)]`
-re-export (`pub use linux::Linux as Current;`). Call it statically (`Current::foo()`), not through
-`&dyn`. Unsupported targets hit `compile_error!`. Per-OS dependencies go under
-`[target.'cfg(...)'.dependencies]`.
+Lives in `code/obeliskd/src/platform/`:
+
+- `mod.rs`: the `PlatformImpl` trait (the contract), and a `#[cfg(target_os = ...)]` export of
+  exactly one implementation as `Platform` (`pub use linux::Linux as Platform;`).
+- `linux.rs`, `macos.rs`, `windows.rs`: a unit struct per OS implementing `PlatformImpl`.
+- Any other OS hits `compile_error!`.
+
+Call through the type, `Platform::foo()`, with `PlatformImpl` in scope (both are re-exported at the
+crate root). Trait methods take no `self`, so calls are static, the structs are zero-sized, and
+other OSes' code isn't compiled. Don't use `&dyn PlatformImpl` unless you need dynamic dispatch
+(e.g. test fakes).
+
+To add an operation: add it to `PlatformImpl`, then implement it in all three files. CI's
+`check-target` jobs run clippy for macOS and Windows, so a missing implementation fails the MR.
+Per-OS dependencies go under `[target.'cfg(...)'.dependencies]`.

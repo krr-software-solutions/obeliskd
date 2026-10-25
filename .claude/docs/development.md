@@ -21,6 +21,7 @@ MR pipelines only, for now. Jobs come from the shared templates in `krrss/util/p
 |-------------------|--------|----------------------------------------------------------------|
 | `check-pre-merge` | auto   | fails if a `FIX-PRE-MERGE` marker is left anywhere (see below) |
 | `check`           | auto   | fmt, clippy (`-D warnings`), tests                             |
+| `check-target`    | auto   | clippy for macOS and Windows (platform code must compile)      |
 | `build: [target]` | manual | cross-builds the `obeliskd` binary with cargo-zigbuild (Linux musl, macOS) |
 
 No release, image, or publish jobs yet.

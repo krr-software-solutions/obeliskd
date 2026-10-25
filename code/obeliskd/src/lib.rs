@@ -1,6 +1,8 @@
 pub mod error;
+pub mod platform;
 
 pub use error::ObeliskdError;
+pub use platform::{Platform, PlatformImpl};
 
 /// Prints a greeting to stdout.
 ///
@@ -13,6 +15,6 @@ pub fn print_hello(fail: bool) -> Result<(), ObeliskdError> {
             message: "asked to fail (--fail)".to_string(),
         });
     }
-    println!("Hello from obeliskd!");
+    println!("Hello from obeliskd on {}!", Platform::name());
     Ok(())
 }
