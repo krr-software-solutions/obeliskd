@@ -17,5 +17,9 @@ doc = false
 [dependencies]
 obeliskd.workspace = true
 
+clap.workspace = true
+clap_complete.workspace = true
+tokio.workspace = true
+
 [lints]
 workspace = true

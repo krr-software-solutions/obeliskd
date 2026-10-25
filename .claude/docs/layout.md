@@ -9,6 +9,18 @@ A Cargo workspace; every crate lives under `code/`.
 
 Keep the binary thin. Logic goes in the `obeliskd` library, where it can be tested.
 
+## The CLI entry point
+
+`code/obeliskd-cli/src/main.rs` follows one shape:
+
+- `Cli` / `Command`: clap derive. Each subcommand maps to a `command_*` function.
+- `main_impl() -> Result<(), ObeliskdError>`: parses, dispatches, and propagates errors with `?`.
+- `#[tokio::main] async fn main() -> ExitCode`: only calls `main_impl` and turns an error into
+  `ERROR - …` on stderr and exit code 1.
+
+Errors are `obeliskd::ObeliskdError` (`thiserror`, in `code/obeliskd/src/error.rs`). Add a variant
+per failure kind, with `#[from]` for wrapped errors, rather than stringly `Generic` messages.
+
 The binary is named `obeliskd` too (`[[bin]] name`), so it sets `doc = false`: otherwise
 `cargo doc` writes both to `target/doc/obeliskd` and one clobbers the other.
 
