@@ -25,6 +25,33 @@ impl PlatformImpl for MacOs {
         SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 79), 53)
     }
 
+    fn ensure_local_address(address: Ipv4Addr) -> Result<(), ObeliskdError> {
+        if unix::is_local(address) {
+            return Ok(());
+        }
+        let error = |message: String| ObeliskdError::LocalAddress { address, message };
+
+        // Adding an address is an ioctl, which would need `unsafe`; ifconfig does it for us.
+        let output = std::process::Command::new("/sbin/ifconfig")
+            .args(["lo0", "alias", &address.to_string(), "up"])
+            .output()
+            .map_err(|e| error(format!("couldn't run ifconfig: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(error(format!(
+                "`ifconfig lo0 alias {address}` failed (needs root): {}",
+                stderr.trim()
+            )));
+        }
+        if unix::is_local(address) {
+            Ok(())
+        } else {
+            Err(error(
+                "still not bindable after adding the lo0 alias".to_string(),
+            ))
+        }
+    }
+
     fn control_socket_path() -> PathBuf {
         PathBuf::from("/var/run/obeliskd/obeliskd.sock")
     }

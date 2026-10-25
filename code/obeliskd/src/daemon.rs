@@ -15,8 +15,9 @@ use crate::{ObeliskdError, Platform, PlatformImpl, control, dns};
 ///
 /// If either can't be bound, or the control server fails.
 pub async fn run(socket: &Path, dns_address: SocketAddrV4) -> Result<(), ObeliskdError> {
-    // DNS first: it's the one likely to fail (port 53 needs root), and then there's no control
-    // socket to clean up.
+    // DNS first: it's the one likely to fail (port 53 needs root; on macOS the address may need an
+    // lo0 alias), and then there's no control socket to clean up.
+    Platform::ensure_local_address(*dns_address.ip())?;
     let dns_socket = dns::bind(dns_address).await?;
     let listener = Platform::bind_control(socket)?;
     let daemon = DaemonInfo {

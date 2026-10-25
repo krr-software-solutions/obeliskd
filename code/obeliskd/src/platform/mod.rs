@@ -5,7 +5,7 @@
 //! (`Platform::name()`), never `&dyn`: the calls are static and other OSes' code isn't compiled.
 
 use std::io;
-use std::net::SocketAddrV4;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
 use axum::serve::Listener;
@@ -31,6 +31,16 @@ pub trait PlatformImpl {
 
     /// Where the daemon answers DNS, unless told otherwise.
     fn default_dns_address() -> SocketAddrV4;
+
+    /// Makes `address` local to this host, so it can be bound. Does nothing if it already is.
+    ///
+    /// On Linux all of `127.0.0.0/8` is local already. macOS only has `127.0.0.1` on `lo0`, so any
+    /// other address is added as an `lo0` alias (needs root; gone after a reboot).
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::LocalAddress`] if it isn't local and can't be made so.
+    fn ensure_local_address(address: Ipv4Addr) -> Result<(), ObeliskdError>;
 
     /// Where the daemon listens for control connections, unless told otherwise.
     fn control_socket_path() -> PathBuf;

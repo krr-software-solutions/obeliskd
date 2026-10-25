@@ -3,7 +3,7 @@
 compile_error!("obeliskd doesn't support Windows yet");
 
 use std::io;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::{Path, PathBuf};
 
 use tokio::net::{TcpListener, TcpStream};
@@ -32,6 +32,18 @@ impl PlatformImpl for Windows {
 
     fn default_dns_address() -> SocketAddrV4 {
         SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 79), 53)
+    }
+
+    fn ensure_local_address(address: Ipv4Addr) -> Result<(), ObeliskdError> {
+        // All of 127.0.0.0/8 is local on Windows; adding other addresses is still to do.
+        if UdpSocket::bind((address, 0)).is_ok() {
+            Ok(())
+        } else {
+            Err(ObeliskdError::LocalAddress {
+                address,
+                message: "adding addresses isn't supported on Windows yet".to_string(),
+            })
+        }
     }
 
     fn control_socket_path() -> PathBuf {

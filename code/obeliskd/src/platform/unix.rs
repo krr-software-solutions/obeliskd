@@ -1,6 +1,7 @@
 //! The Unix-socket implementation, shared by Linux and macOS.
 
 use std::io;
+use std::net::{Ipv4Addr, UdpSocket};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::Path;
 
@@ -40,6 +41,11 @@ pub fn bind_control(path: &Path) -> Result<UnixListener, ObeliskdError> {
     // Anyone may connect: the daemon checks each caller's credentials itself (see control::auth).
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666)).map_err(bind_error)?;
     Ok(listener)
+}
+
+/// Whether `address` can be bound here, i.e. the host owns it.
+pub fn is_local(address: Ipv4Addr) -> bool {
+    UdpSocket::bind((address, 0)).is_ok()
 }
 
 pub fn unbind_control(path: &Path) {
@@ -106,6 +112,13 @@ mod tests {
 
         stop.send(()).unwrap();
         server.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn is_local_knows_loopback_from_foreign_addresses() {
+        assert!(is_local(Ipv4Addr::LOCALHOST));
+        // TEST-NET-1: reserved for documentation, never assigned to a host.
+        assert!(!is_local(Ipv4Addr::new(192, 0, 2, 1)));
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-use std::net::SocketAddrV4;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 
 /// Every error obeliskd can fail with.
@@ -18,6 +18,9 @@ pub enum ObeliskdError {
         path: PathBuf,
         source: std::io::Error,
     },
+
+    #[error("{address} isn't a local address, and couldn't be made one: {message}")]
+    LocalAddress { address: Ipv4Addr, message: String },
 
     #[error("failed to bind DNS on {address}: {source}{}", bind_hint(source))]
     DnsBind {

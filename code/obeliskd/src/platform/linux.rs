@@ -25,6 +25,19 @@ impl PlatformImpl for Linux {
         SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 79), 53)
     }
 
+    fn ensure_local_address(address: Ipv4Addr) -> Result<(), ObeliskdError> {
+        // All of 127.0.0.0/8 is local on Linux; anything else isn't added by obeliskd (yet).
+        if unix::is_local(address) {
+            Ok(())
+        } else {
+            Err(ObeliskdError::LocalAddress {
+                address,
+                message: "adding addresses isn't supported on Linux yet; use one in 127.0.0.0/8"
+                    .to_string(),
+            })
+        }
+    }
+
     fn control_socket_path() -> PathBuf {
         PathBuf::from("/run/obeliskd/obeliskd.sock")
     }
@@ -47,5 +60,22 @@ impl PlatformImpl for Linux {
 
     fn shutdown_signal() -> impl Future<Output = ()> + Send + 'static {
         unix::shutdown_signal()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_of_127_8_is_already_local() {
+        Linux::ensure_local_address(Ipv4Addr::new(127, 0, 0, 79)).unwrap();
+        Linux::ensure_local_address(Ipv4Addr::new(127, 200, 3, 4)).unwrap();
+    }
+
+    #[test]
+    fn non_loopback_addresses_are_not_added() {
+        let error = Linux::ensure_local_address(Ipv4Addr::new(192, 0, 2, 1)).unwrap_err();
+        assert!(matches!(error, ObeliskdError::LocalAddress { .. }));
     }
 }

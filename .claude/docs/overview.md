@@ -75,6 +75,7 @@ The daemon answers DNS on `--dns-address` (`OBELISKD_DNS_ADDRESS`). The default 
   hostname entry.
 - Avoid `.35`: other DIY DNS proxies pick it as "53 backwards".
 
-On macOS only `127.0.0.1` exists on `lo0` by default, so `.79` needs `ifconfig lo0 alias 127.0.0.79`
-(root, and lost on reboot). Setup (`obeliskd install`) will have to add the alias and make it
-persist.
+On macOS only `127.0.0.1` exists on `lo0` by default, so `daemon run` adds the alias itself at
+startup (`PlatformImpl::ensure_local_address` runs `ifconfig lo0 alias 127.0.0.79`, as root). The
+alias doesn't survive a reboot, but the daemon re-adds it every time it starts. On Linux all of
+`127.0.0.0/8` is local already, so nothing is needed.
