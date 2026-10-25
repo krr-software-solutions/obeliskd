@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = [
+    "code/obeliskd",
+    "code/obeliskd-lib",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+repository = "https://gitlab.krr-software-solutions.com/oss/obeliskd"
+homepage = "https://gitlab.krr-software-solutions.com/oss/obeliskd"
+readme = "README.md"
+
+[workspace.dependencies]
+# workspace crates
+obeliskd-lib = { path = "code/obeliskd-lib", version = "=0.0.0" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }

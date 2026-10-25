@@ -1,0 +1,19 @@
+[package]
+name = "obeliskd"
+description = "The obeliskd daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "obeliskd"
+path = "src/main.rs"
+
+[dependencies]
+obeliskd-lib.workspace = true
+
+[lints]
+workspace = true

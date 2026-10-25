@@ -1,0 +1,93 @@
+# obeliskd CI: the pre-merge checks on MRs.
+#
+# An MR runs:
+#   test   check-pre-merge       no fix-before-merge markers left behind
+#          check                 fmt, clippy, tests
+#   build  build: [<target>]     the `obeliskd` binary per target (cargo-zigbuild, all from Linux); manual
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+include:
+  - project: 'krrss/util/pipeline-utils'
+    ref: main
+    file: '/util.yaml'
+
+stages:
+  - test
+  - build
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo-home"
+  CARGO_TERM_COLOR: always
+
+# A Rust job: the cargo registry is cached per Cargo.lock.
+.rust:
+  image: rust:1
+  variables:
+    KUBERNETES_CPU_REQUEST: "1"
+    KUBERNETES_CPU_LIMIT: "4"
+    KUBERNETES_MEMORY_REQUEST: "1Gi"
+    KUBERNETES_MEMORY_LIMIT: "4Gi"
+  cache:
+    key:
+      files: [Cargo.lock]
+    paths:
+      - .cargo-home/registry/index/
+      - .cargo-home/registry/cache/
+      - .cargo-home/git/db/
+
+# ----- test -----
+
+check-pre-merge:
+  extends:
+    - .runner
+    - ".mr=auto,tag=never"
+  stage: test
+  image: alpine:3.21
+  before_script:
+    - apk add --no-cache bash git
+  script:
+    - bash scripts/check-for-fix.sh
+
+check:
+  extends:
+    - .runner
+    - .rust
+    - ".mr=auto,tag=never"
+  stage: test
+  script:
+    - rustup component add rustfmt clippy
+    - cargo fmt --all --check
+    - cargo clippy --workspace --all-targets --locked -- -D warnings
+    - cargo test --workspace --locked
+
+# ----- build -----
+
+# The daemon for one target, cross-compiled with cargo-zigbuild. Manual, to try a build.
+build:
+  extends:
+    - .runner
+    - .rust
+    - ".mr=manual,tag=never"
+  stage: build
+  needs: []
+  image: ghcr.io/rust-cross/cargo-zigbuild:0.24.0
+  parallel:
+    matrix:
+      - TARGET:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+  script:
+    - rustup toolchain install stable --profile minimal --no-self-update
+    - rustup default stable
+    - rustup target add "$TARGET"
+    - cargo zigbuild --release --locked -p obeliskd --target "$TARGET"
+    - mkdir -p "dist/$TARGET"
+    - cp "target/$TARGET/release/obeliskd" "dist/$TARGET/"
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - dist/

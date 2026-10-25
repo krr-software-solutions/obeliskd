@@ -13,3 +13,7 @@
 *.iml
 *.swp
 .DS_Store
+
+# Release artifacts (CI)
+/dist/
+.cargo-home/
