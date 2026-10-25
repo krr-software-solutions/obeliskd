@@ -7,8 +7,8 @@ understanding the wire format over pulling in a DNS framework.
 
 ## Current state
 
-Scaffolding only: the `obeliskd` CLI has `hello` (calls `obeliskd::print_hello()`) and
-`completions <shell>`. No networking yet.
+Scaffolding only: the `obeliskd` CLI has `daemon run` (prints `todo`) and `completions <shell>`.
+No networking yet.
 
 ## First milestone
 
@@ -34,3 +34,15 @@ Nothing below is decided. Don't silently pick an answer in code; raise it.
 - Whether obeliskd installs the OS routing itself or documents it as manual setup.
 
 These are tracked in the Aletheia knowledge graph under component `OBLSK:obeliskd`.
+
+## Configuration: none by hand
+
+Every setting, rule, and cert changes through the `obeliskd` CLI, which talks to the daemon over its
+control socket. Nothing is a hand-edited file, so there is no `/etc/obeliskd`. Don't add one, and
+don't add flags or files that expect a person to edit config.
+
+- **State dir** (`PlatformImpl::state_dir()`): everything that persists, owned by the daemon.
+  Linux `/var/lib/obeliskd`, macOS `/Library/Application Support/obeliskd`.
+- **Control socket:** one socket. The daemon checks the caller's kernel-verified uid
+  (`peer_cred()`) before reading anything. Access starts root-only (so `sudo` works) and is widened
+  through the CLI.

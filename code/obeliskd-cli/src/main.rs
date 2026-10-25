@@ -15,21 +15,27 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Print a greeting
-    Hello {
-        /// Fail with an error instead of printing
-        #[arg(long)]
-        fail: bool,
+    /// Run and manage the daemon
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
     },
     /// Print a shell completion script
     Completions { shell: clap_complete::Shell },
 }
 
+#[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    /// Run the daemon in the foreground
+    Run,
+}
+
 //
 
 #[expect(clippy::unused_async, reason = "placeholder: real commands will await")]
-async fn command_hello(fail: bool) -> Result<(), ObeliskdError> {
-    obeliskd::print_hello(fail)
+async fn command_daemon_run() -> Result<(), ObeliskdError> {
+    println!("todo");
+    Ok(())
 }
 
 fn command_completions(shell: clap_complete::Shell) {
@@ -44,7 +50,9 @@ async fn main_impl() -> Result<(), ObeliskdError> {
     let cli: Cli = Cli::parse();
 
     match cli.command {
-        Command::Hello { fail } => command_hello(fail).await,
+        Command::Daemon { command } => match command {
+            DaemonCommand::Run => command_daemon_run().await,
+        },
         Command::Completions { shell } => {
             command_completions(shell);
             Ok(())

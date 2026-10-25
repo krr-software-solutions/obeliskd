@@ -23,7 +23,7 @@ under `.test`) and stays out of the way for everything else.
 
 ```sh
 cargo build
-cargo run -p obeliskd-cli -- hello
+cargo run -p obeliskd-cli -- daemon run
 cargo test --workspace
 ```
 

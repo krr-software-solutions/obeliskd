@@ -3,7 +3,7 @@
 ## Commands
 
 ```sh
-cargo run -p obeliskd-cli -- hello                           # run a command
+cargo run -p obeliskd-cli -- daemon run                      # run the daemon (foreground)
 cargo run -p obeliskd-cli -- completions zsh                 # shell completions
 cargo fmt --all                                              # format
 cargo clippy --workspace --all-targets --locked -- -D warnings

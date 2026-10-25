@@ -4,10 +4,17 @@
 //! those is exported as [`Platform`], chosen at compile time. Call through the type
 //! (`Platform::name()`), never `&dyn`: the calls are static and other OSes' code isn't compiled.
 
+use std::path::PathBuf;
+
 /// What each OS has to provide.
 pub trait PlatformImpl {
     /// The OS's name, e.g. `"linux"`.
     fn name() -> &'static str;
+
+    /// Where the daemon keeps everything that persists: settings, rules, the CA, certs.
+    ///
+    /// The daemon owns it; nothing in it is edited by hand.
+    fn state_dir() -> PathBuf;
 }
 
 #[cfg(target_os = "linux")]
