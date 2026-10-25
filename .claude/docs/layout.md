@@ -9,6 +9,26 @@ A Cargo workspace; every crate lives under `code/`.
 
 Keep the binary thin. Logic goes in the `obeliskd` library, where it can be tested.
 
+## The control API (`code/obeliskd/src/control/`)
+
+HTTP over the control socket: the daemon serves it with axum, and the CLI calls it with reqwest.
+
+- `api.rs`: the wire types, shared by both sides (camelCase JSON). Errors are `{ "error": "…" }`.
+- `server.rs`: the router, the handlers, and `run` (bind, serve until SIGTERM/Ctrl-C, unbind).
+- `client.rs`: `ControlClient`, with one method per endpoint.
+- `auth.rs`: who may call what. `Peer` (uid, gid, pid) is captured from the kernel once per
+  connection (`ConnInfo`, via axum's `ConnectInfo`). A handler states what it needs by taking an
+  extractor:
+  - `Caller`: any user allowed on the socket;
+  - `Admin`: root;
+  - neither: anyone who can connect (e.g. `/health`).
+
+  Requests are parsed first and then rejected with 403. That's intended: there's no
+  check-before-read.
+
+To add an endpoint, add its types to `api.rs`, a handler and route in `server.rs`, and a method in
+`client.rs`. Test handlers with `MockConnectInfo` (see `server.rs`'s tests).
+
 ## The CLI entry point
 
 `code/obeliskd-cli/src/main.rs` follows one shape:
@@ -49,9 +69,16 @@ Lives in `code/obeliskd/src/platform/`:
 - `mod.rs`: the `PlatformImpl` trait (the contract), and a `#[cfg(target_os = ...)]` export of
   exactly one implementation as `Platform` (`pub use linux::Linux as Platform;`).
 - `linux.rs`, `macos.rs`, `windows.rs`: a unit struct per OS implementing `PlatformImpl`.
+- `unix.rs` (`#[cfg(unix)]`): the Unix-socket code that Linux and macOS share. Their impls
+  delegate to it and add only their own paths.
 - **Windows isn't supported yet:** `windows.rs` starts with a `compile_error!`, so only Windows
   builds fail. To start supporting it, delete that line and re-add the Windows `check-target` job.
 - Any other OS hits `compile_error!`.
+
+`PlatformImpl` holds only the OS-specific edges: paths (`state_dir`, `control_socket_path`), the
+control socket's transport (`type ControlListener`, `bind_control`, `unbind_control`,
+`control_client`), who is calling (`peer`), and `shutdown_signal`. The API, auth, and state on top
+of those are shared code.
 
 Call through the type, `Platform::foo()`, with `PlatformImpl` in scope (both are re-exported at the
 crate root). Trait methods take no `self`, so calls are static, the structs are zero-sized, and

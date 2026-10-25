@@ -3,7 +3,8 @@
 ## Commands
 
 ```sh
-cargo run -p obeliskd-cli -- daemon run                      # run the daemon (foreground)
+cargo run -p obeliskd-cli -- --socket /tmp/o.sock daemon run     # run the daemon, no root needed
+cargo run -p obeliskd-cli -- --socket /tmp/o.sock daemon health  # call it
 cargo run -p obeliskd-cli -- completions zsh                 # shell completions
 cargo fmt --all                                              # format
 cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -11,6 +12,10 @@ cargo test --workspace --locked
 ```
 
 `--locked` matches CI: if `Cargo.lock` needs to change, commit the change.
+
+The default socket (`/run/obeliskd/obeliskd.sock` on Linux) needs root to create. For development,
+point both sides elsewhere with `--socket` or `OBELISKD_SOCKET`. Only root passes the `Caller` and
+`Admin` checks for now, but `/health` is open to anyone.
 
 ## CI (`.gitlab-ci.yml`)
 

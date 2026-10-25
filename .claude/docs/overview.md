@@ -7,8 +7,8 @@ understanding the wire format over pulling in a DNS framework.
 
 ## Current state
 
-Scaffolding only: the `obeliskd` CLI has `daemon run` (prints `todo`) and `completions <shell>`.
-No networking yet.
+The control socket works end to end: `obeliskd daemon run` serves the control API (just
+`GET /health` so far), and `obeliskd daemon health` calls it. No DNS yet.
 
 ## First milestone
 

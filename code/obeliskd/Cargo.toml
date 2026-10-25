@@ -9,7 +9,17 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
+axum.workspace = true
+jiff.workspace = true
+reqwest.workspace = true
+serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+tower.workspace = true
 
 [lints]
 workspace = true

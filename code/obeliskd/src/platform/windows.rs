@@ -2,13 +2,23 @@
 // so this fails exactly those builds. Delete the line below to start supporting it.
 compile_error!("obeliskd doesn't support Windows yet");
 
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use tokio::net::{TcpListener, TcpStream};
 
 use super::PlatformImpl;
+use crate::ObeliskdError;
+use crate::control::Peer;
 
 pub struct Windows;
 
+// The control socket will be a named pipe (`\\.\pipe\obeliskd`): reqwest can already connect to
+// one (`ClientBuilder::windows_named_pipe`), but the server side and the caller's identity (the
+// client's token / SID) are still to do. `TcpListener` is a stand-in so this compiles.
 impl PlatformImpl for Windows {
+    type ControlListener = TcpListener;
+
     fn name() -> &'static str {
         "windows"
     }
@@ -17,5 +27,27 @@ impl PlatformImpl for Windows {
         let program_data =
             std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into());
         PathBuf::from(program_data).join("obeliskd")
+    }
+
+    fn control_socket_path() -> PathBuf {
+        PathBuf::from(r"\\.\pipe\obeliskd")
+    }
+
+    fn bind_control(_path: &Path) -> Result<TcpListener, ObeliskdError> {
+        todo!("bind a named pipe")
+    }
+
+    fn unbind_control(_path: &Path) {}
+
+    fn peer(_io: &TcpStream) -> io::Result<Peer> {
+        todo!("identify a named-pipe client")
+    }
+
+    fn control_client(_path: &Path) -> Result<reqwest::Client, ObeliskdError> {
+        todo!("reqwest's windows_named_pipe")
+    }
+
+    async fn shutdown_signal() {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }

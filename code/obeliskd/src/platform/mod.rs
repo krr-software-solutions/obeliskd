@@ -4,10 +4,22 @@
 //! those is exported as [`Platform`], chosen at compile time. Call through the type
 //! (`Platform::name()`), never `&dyn`: the calls are static and other OSes' code isn't compiled.
 
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use axum::serve::Listener;
+
+use crate::ObeliskdError;
+use crate::control::Peer;
 
 /// What each OS has to provide.
+///
+/// Only the OS-specific edges live here: paths, the control socket's transport, and who is on the
+/// other end of it. Everything above that (the API, auth, state) is shared code.
 pub trait PlatformImpl {
+    /// What the control server accepts connections on.
+    type ControlListener: Listener;
+
     /// The OS's name, e.g. `"linux"`.
     fn name() -> &'static str;
 
@@ -15,7 +27,41 @@ pub trait PlatformImpl {
     ///
     /// The daemon owns it; nothing in it is edited by hand.
     fn state_dir() -> PathBuf;
+
+    /// Where the daemon listens for control connections, unless told otherwise.
+    fn control_socket_path() -> PathBuf;
+
+    /// Binds the control socket at `path`, replacing a stale one.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::AlreadyRunning`] if a daemon is already listening there, or
+    /// [`ObeliskdError::ControlBind`].
+    fn bind_control(path: &Path) -> Result<Self::ControlListener, ObeliskdError>;
+
+    /// Cleans up after [`bind_control`](Self::bind_control), once the server has stopped.
+    fn unbind_control(path: &Path);
+
+    /// Who is on the other end of an accepted control connection.
+    ///
+    /// # Errors
+    ///
+    /// If the OS won't say.
+    fn peer(io: &<Self::ControlListener as Listener>::Io) -> io::Result<Peer>;
+
+    /// An HTTP client whose every request goes to the control socket at `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::ControlClient`] if the client can't be built.
+    fn control_client(path: &Path) -> Result<reqwest::Client, ObeliskdError>;
+
+    /// Resolves when the daemon is asked to stop (Ctrl-C, and the service manager's signal).
+    fn shutdown_signal() -> impl Future<Output = ()> + Send + 'static;
 }
+
+#[cfg(unix)]
+mod unix;
 
 #[cfg(target_os = "linux")]
 mod linux;
