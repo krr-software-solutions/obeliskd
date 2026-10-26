@@ -6,10 +6,26 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::time::Duration;
 
+use clap_complete::Shell;
+
 use obeliskd::control::api::SupernetDealloc;
 use obeliskd::control::client::ControlClient;
 use obeliskd::manage::{DaemonSettings, INSTALL_PATH, ServiceAction, install_binary};
 use obeliskd::{ObeliskdError, Platform, PlatformImpl};
+
+/// Where `install` puts shell completions: the system-wide directories each shell loads from on its
+/// own, so no rc file needs editing.
+const COMPLETIONS: [(Shell, &str); 3] = [
+    (
+        Shell::Bash,
+        "/usr/local/share/bash-completion/completions/obeliskd",
+    ),
+    (Shell::Zsh, "/usr/local/share/zsh/site-functions/_obeliskd"),
+    (
+        Shell::Fish,
+        "/usr/local/share/fish/vendor_completions.d/obeliskd.fish",
+    ),
+];
 
 /// How long to wait for a (re)started daemon to answer.
 const STARTUP: Duration = Duration::from_secs(15);
@@ -36,7 +52,10 @@ fn require_installed() -> Result<(), ObeliskdError> {
 
 /// Copies this binary into place, installs the service with `settings`, and waits for it to
 /// answer.
-pub async fn install(settings: &DaemonSettings) -> Result<(), ObeliskdError> {
+pub async fn install(
+    settings: &DaemonSettings,
+    completions: fn(Shell) -> Vec<u8>,
+) -> Result<(), ObeliskdError> {
     require_root("install")?;
     let exe = std::env::current_exe()?;
     let target = Path::new(INSTALL_PATH);
@@ -48,6 +67,14 @@ pub async fn install(settings: &DaemonSettings) -> Result<(), ObeliskdError> {
     } else {
         println!("{} is already this binary", target.display());
     }
+    for (shell, path) in COMPLETIONS {
+        let path = Path::new(path);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, completions(shell))?;
+    }
+    println!("installed shell completions (bash, zsh, fish) under /usr/local/share");
     Platform::install_service(&settings.command())?;
     println!(
         "installed {}; it starts now and at every boot",
@@ -85,6 +112,13 @@ pub async fn uninstall(socket: &Path, purge: Option<&Path>) -> Result<(), Obelis
     }
     // The daemon removes it on a clean stop; this covers one that didn't stop cleanly.
     Platform::remove_dns_routing()?;
+    for (_, path) in COMPLETIONS {
+        match std::fs::remove_file(path) {
+            Ok(()) => println!("removed {path}"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
     match std::fs::remove_file(INSTALL_PATH) {
         Ok(()) => println!("removed {INSTALL_PATH}"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

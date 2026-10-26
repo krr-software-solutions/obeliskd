@@ -488,7 +488,7 @@ async fn run_manage(socket: &Path, command: ManageCommand) -> Result<(), Obelisk
                 state_dir: settings.state_dir,
                 log_level: settings.log_level,
             };
-            manage::install(&settings).await
+            manage::install(&settings, completion_script).await
         }
         ManageCommand::Uninstall { purge, state_dir } => {
             manage::uninstall(socket, purge.then_some(state_dir.as_path())).await
@@ -738,9 +738,17 @@ fn init_logging(filter: &str) -> Result<(), ObeliskdError> {
 }
 
 fn command_completions(shell: clap_complete::Shell) {
+    use std::io::Write;
+    let _ = std::io::stdout().write_all(&completion_script(shell));
+}
+
+/// The completion script for `shell` (also installed by `manage install`).
+fn completion_script(shell: clap_complete::Shell) -> Vec<u8> {
     let mut cmd = command();
     let name = cmd.get_name().to_string();
-    clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+    let mut out = Vec::new();
+    clap_complete::generate(shell, &mut cmd, name, &mut out);
+    out
 }
 
 //

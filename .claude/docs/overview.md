@@ -71,7 +71,9 @@ Check it with `obeliskd manage status`, which resolves a real host through the s
   On Linux that's the systemd unit `/etc/systemd/system/obeliskd.service` (`WantedBy=multi-user.target`,
   `Restart=on-failure`). On macOS it's a launchd plist in `/Library/LaunchDaemons`, where
   `KeepAlive` only restarts it after a failure, so a clean stop stays stopped, as on Linux.
-- `uninstall [--purge]`: removes the service, the binary and DNS routing, and keeps the state.
+  It also writes shell completions (bash, zsh, fish) into the system-wide directories under
+  `/usr/local/share` that each shell loads on its own, so no rc file is edited.
+- `uninstall [--purge]`: removes the service, the binary, the completions and DNS routing, and keeps the state.
   `--purge` first deallocates everything through the daemon, then deletes the state dir.
 - `start` / `stop` / `restart` / `enable` / `disable`: the service manager's own verbs. `stop`
   doesn't disable it; `disable` doesn't stop it.
