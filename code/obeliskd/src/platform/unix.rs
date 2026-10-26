@@ -7,8 +7,8 @@ use std::path::Path;
 
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::ObeliskdError;
 use crate::control::Peer;
+use crate::{ObeliskdError, Platform, PlatformImpl};
 
 pub fn bind_control(path: &Path) -> Result<UnixListener, ObeliskdError> {
     let bind_error = |source: io::Error| ObeliskdError::ControlBind {
@@ -16,8 +16,18 @@ pub fn bind_control(path: &Path) -> Result<UnixListener, ObeliskdError> {
         source,
     };
 
+    // The socket's dir must be enterable by everyone (the socket itself is 0666), whatever the
+    // daemon's umask (077, for its state). So: 0755 for a dir created here, and for the default
+    // socket dir, which is obeliskd's own (repairing one an older version created 0700). Any
+    // other existing dir (e.g. `--socket ~/o.sock`) is left as it is.
     if let Some(dir) = path.parent() {
+        let created = !dir.exists();
         std::fs::create_dir_all(dir).map_err(bind_error)?;
+        let ours = Platform::control_socket_path().parent() == Some(dir);
+        if created || ours {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+                .map_err(bind_error)?;
+        }
     }
 
     // A socket left behind by a daemon that didn't shut down cleanly: replace it, unless something
@@ -290,6 +300,20 @@ mod tests {
         assert!(is_local(Ipv4Addr::LOCALHOST));
         // TEST-NET-1: reserved for documentation, never assigned to a host.
         assert!(!is_local(Ipv4Addr::new(192, 0, 2, 1)));
+    }
+
+    #[tokio::test]
+    async fn a_socket_dir_it_creates_is_enterable_despite_the_umask() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("run/obeliskd/obeliskd.sock");
+        // What the daemon runs with (prepare_state_dir sets it).
+        let old = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
+        let bound = bind_control(&socket);
+        nix::sys::stat::umask(old);
+        drop(bound.unwrap());
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(socket.parent().unwrap()), 0o755);
+        assert_eq!(mode(&socket), 0o666);
     }
 
     #[tokio::test]

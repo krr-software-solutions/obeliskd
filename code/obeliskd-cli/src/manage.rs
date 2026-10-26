@@ -213,9 +213,16 @@ pub async fn status(socket: &Path) -> Result<(), ObeliskdError> {
     println!("binary   {binary}");
 
     let client = ControlClient::new(socket)?;
-    let Ok(health) = client.health().await else {
-        println!("daemon   not answering on {}", socket.display());
-        return Ok(());
+    let health = match client.health().await {
+        Ok(health) => health,
+        Err(error) => {
+            println!(
+                "daemon   not answering on {}: {}",
+                socket.display(),
+                cause(&error)
+            );
+            return Ok(());
+        }
     };
     println!(
         "daemon   answering on {} since {}; DNS on {}",
@@ -225,6 +232,16 @@ pub async fn status(socket: &Path) -> Result<(), ObeliskdError> {
     );
     println!("dns      {}", dns_check(&client).await);
     Ok(())
+}
+
+/// The innermost cause of an error (e.g. "Permission denied (os error 13)"), which is what says
+/// why the daemon couldn't be reached.
+fn cause(error: &dyn std::error::Error) -> String {
+    let mut inner = error;
+    while let Some(source) = inner.source() {
+        inner = source;
+    }
+    inner.to_string()
 }
 
 /// `obeliskd 0.0.0` → `0.0.0`, from the installed binary.

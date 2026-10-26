@@ -260,14 +260,17 @@ fn dns_server(dns: SocketAddrV4) -> String {
 }
 
 /// The zone, and only the zone, goes to the daemon: a routing domain (`~`), not a default route.
+/// The server comes last: from the moment a link has one, resolved may send it queries, so the
+/// routing domain and `default-route false` must already be in place (otherwise unrelated
+/// lookups made during startup reach the daemon and get REFUSED).
 fn resolvectl_args(server: &str) -> Vec<Vec<String>> {
     let domain = format!("~{ZONE}");
     vec![
-        command::args(&["dns", DNS_LINK, server]),
-        command::args(&["domain", DNS_LINK, &domain]),
         command::args(&["default-route", DNS_LINK, "false"]),
+        command::args(&["domain", DNS_LINK, &domain]),
         command::args(&["llmnr", DNS_LINK, "false"]),
         command::args(&["mdns", DNS_LINK, "false"]),
+        command::args(&["dns", DNS_LINK, server]),
     ]
 }
 
@@ -359,11 +362,11 @@ mod tests {
         assert_eq!(
             resolved,
             [
-                "dns obd0 127.0.0.79",
-                "domain obd0 ~obd.internal",
                 "default-route obd0 false",
+                "domain obd0 ~obd.internal",
                 "llmnr obd0 false",
                 "mdns obd0 false",
+                "dns obd0 127.0.0.79",
             ]
         );
     }
