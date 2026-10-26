@@ -8,7 +8,9 @@ use crate::dns::ZONE;
 /// A full hostname under the zone, e.g. `app.obd.internal` or `api.app.obd.internal`.
 ///
 /// Every label before the zone follows [`Name`]'s rules (lowercase LDH, at most 63 characters, no
-/// `--` in positions 3–4), there's at least one, and the whole name is at most 253 characters.
+/// `--` in positions 3–4) or is exactly `*`, a wildcard matching any one label (see
+/// [`crate::dns::hosts`] for which pattern wins). There's at least one label, and the whole name is
+/// at most 253 characters.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Hostname(String);
@@ -28,7 +30,9 @@ impl Hostname {
             return Err(format!("{name:?} is longer than {MAX_LEN} characters"));
         }
         for label in labels.split('.') {
-            Name::parse(label).map_err(|e| format!("{name:?}: {e}"))?;
+            if label != "*" {
+                Name::parse(label).map_err(|e| format!("{name:?}: {e} (or be exactly `*`)"))?;
+            }
         }
         Ok(Hostname(name.to_string()))
     }
@@ -95,6 +99,9 @@ mod tests {
             "app.obd.internal",
             "api.app.obd.internal",
             "x--y.obd.internal",
+            "*.obd.internal",
+            "*.*.x.obd.internal",
+            "a.*.x.obd.internal",
         ] {
             assert!(Hostname::parse(ok).is_ok(), "{ok}");
         }
@@ -107,6 +114,9 @@ mod tests {
             "ab--cd.obd.internal",
             "app.obd.internal.",
             "app.example.com",
+            "ab*.obd.internal",
+            "*ab.obd.internal",
+            "**.obd.internal",
         ] {
             assert!(Hostname::parse(bad).is_err(), "{bad}");
         }

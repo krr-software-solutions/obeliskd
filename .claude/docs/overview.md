@@ -20,7 +20,7 @@ An ip in a host subnet is usable as soon as it's allocated: on Linux the subnet'
 covers it, and on macOS it gets a `/32` lo0 alias. An ip in a docker subnet is a reservation that a
 container (`--ip`) or a MetalLB-pinned Service claims.
 
-The daemon **requires root**, and re-applies all of this at every start. There's no TCP, no IPv6, no `*` wildcard hosts yet, and no DNS routing setup (`~obd.internal`).
+The daemon **requires root**, and re-applies all of this at every start. There's no TCP, no IPv6, and no DNS routing setup (`~obd.internal`).
 
 ## The zone and its answers (`code/obeliskd/src/dns/`)
 
@@ -31,12 +31,22 @@ original case.
 | Query | Response |
 |---|---|
 | a host, type A | `NOERROR`, AA, one A record: its ip's address, TTL 60 |
+| no exact host, but a wildcard host matches (`*.b.x.obd.internal`) | the winning pattern's address (see below) |
 | a host, other types | `NOERROR`, AA, no answers (NODATA): the name exists, just not with that type |
 | `obd.internal` itself, or a name with hosts below it (e.g. `x.obd.internal` when `a.x.obd.internal` exists) | NODATA: these exist too (RFC 8020's "empty non-terminals") |
 | any other name in the zone | **`NXDOMAIN`**, AA. obeliskd knows every name. There's no SOA in the answer, so resolvers don't cache it, and a new host works immediately |
 | anything outside the zone | `REFUSED`: not our zone. Never `NXDOMAIN`, which resolvers would cache as "doesn't exist" |
 | not a standard query / malformed | `NOTIMP` / `FORMERR` |
 | a response, or < 12 bytes | dropped |
+
+**Wildcard hosts.** A label can be exactly `*`, anywhere in the name (`*.apps…`, `a.*.x…`,
+`*.*.x…`), and it matches **exactly one label**. When several hosts match a name:
+
+- an exact host wins;
+- otherwise the most specific pattern wins, judged **from the right** (from the zone outward): at
+  the first label where two patterns differ, a literal beats `*`.
+
+So for `a.b.x.obd.internal`, `*.b.x` beats `a.*.x`. There are never ties. See `dns/hosts.rs`.
 
 The wire format is hand-rolled (`dns/wire.rs`, RFC 1035): just enough to read one question and
 write one answer. Queries carrying EDNS (systemd-resolved sends them) are answered without an OPT

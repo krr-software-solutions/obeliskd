@@ -1305,8 +1305,8 @@ mod tests {
             table
                 .read()
                 .unwrap()
-                .get("app.obd.internal")
-                .map(ToString::to_string),
+                .lookup("app.obd.internal")
+                .map(|a| a.to_string()),
             Some("10.57.0.1".to_string()),
             "DNS sees it without a restart"
         );
@@ -1342,7 +1342,7 @@ mod tests {
             .dealloc_host(&Hostname::parse("app.obd.internal").unwrap())
             .await
             .unwrap();
-        assert!(table.read().unwrap().get("app.obd.internal").is_none());
+        assert!(table.read().unwrap().lookup("app.obd.internal").is_none());
         let file = std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap();
         assert!(!file.contains("app.obd.internal"), "{file}");
         let gone = store

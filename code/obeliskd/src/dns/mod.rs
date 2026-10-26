@@ -6,15 +6,16 @@
 //! we don't own doesn't exist). Inside the zone obeliskd knows every name: a host answers with its
 //! ip's address, and anything else is `NXDOMAIN`.
 
+pub mod hosts;
 pub mod wire;
 
-use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::SocketAddrV4;
 use std::sync::{Arc, RwLock};
 
 use tokio::net::UdpSocket;
 
 use crate::ObeliskdError;
+pub use hosts::HostTable;
 use wire::{ARecord, CLASS_IN, Header, OPCODE_QUERY, Question, Rcode, TYPE_A};
 
 /// The suffix obeliskd answers for: `*.obd.internal`.
@@ -25,10 +26,6 @@ const ANSWER_TTL: u32 = 60;
 
 /// Big enough for any query, EDNS options included; longer datagrams are truncated by the OS.
 const MAX_QUERY_LEN: usize = 4096;
-
-/// Every host, by full name: what DNS answers with. Swapped whole whenever hosts change, so a
-/// query never waits on the store.
-pub type HostTable = HashMap<String, Ipv4Addr>;
 
 /// Shared between the store (which replaces the table) and the DNS loop (which reads it).
 pub type SharedHosts = Arc<RwLock<Arc<HostTable>>>;
@@ -62,8 +59,8 @@ pub fn respond(packet: &[u8], hosts: &HostTable) -> Option<Vec<u8>> {
 
     // Ours: authoritative from here on.
     let name = question.name.to_dotted();
-    let (rcode, answer) = match hosts.get(&name) {
-        Some(&address) => {
+    let (rcode, answer) = match hosts.lookup(&name) {
+        Some(address) => {
             let answer = (question.qtype == TYPE_A).then_some(ARecord {
                 ttl: ANSWER_TTL,
                 address,
@@ -73,9 +70,7 @@ pub fn respond(packet: &[u8], hosts: &HostTable) -> Option<Vec<u8>> {
         }
         // The zone itself, and names with hosts below them (RFC 8020's "empty non-terminals"),
         // exist too: NODATA.
-        None if name == ZONE || hosts.keys().any(|h| h.ends_with(&format!(".{name}"))) => {
-            (Rcode::NoError, None)
-        }
+        None if name == ZONE || hosts.has_below(&name) => (Rcode::NoError, None),
         None => (Rcode::NxDomain, None),
     };
     Some(wire::response(
@@ -126,6 +121,8 @@ pub async fn serve(socket: UdpSocket, hosts: SharedHosts) {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
 
     fn hosts() -> HostTable {
@@ -198,6 +195,30 @@ mod tests {
             0, 0, 0, 60,      // TTL
             0, 4, 10, 57, 0, 5,
         ]);
+    }
+
+    #[test]
+    fn wildcard_hosts_answer_for_one_label() {
+        let hosts = HostTable::from([(
+            "*.apps.obd.internal".to_string(),
+            Ipv4Addr::new(10, 57, 0, 9),
+        )]);
+        let r = parse(&respond(&query("Web.Apps.OBD.internal", TYPE_A), &hosts).unwrap());
+        assert_eq!((rcode(r.flags), r.ancount), (0, 1));
+        assert_eq!(&r.rest[r.rest.len() - 4..], [10, 57, 0, 9]);
+
+        let deeper = parse(&respond(&query("a.web.apps.obd.internal", TYPE_A), &hosts).unwrap());
+        assert_eq!(
+            rcode(deeper.flags),
+            Rcode::NxDomain as u16,
+            "* is exactly one label"
+        );
+        let parent = parse(&respond(&query("apps.obd.internal", TYPE_A), &hosts).unwrap());
+        assert_eq!(
+            (rcode(parent.flags), parent.ancount),
+            (0, 0),
+            "NODATA: names exist below it"
+        );
     }
 
     #[test]

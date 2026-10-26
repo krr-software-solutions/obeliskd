@@ -54,7 +54,8 @@ The tree is supernet → subnet → ip. `Ip` (nested in its subnet) is a name pl
 - in a host subnet: anything else in the range.
 
 **Hosts** (`model/host.rs`) are full hostnames (`app.obd.internal`, never `obd.internal` itself,
-and no `*` yet). On disk they live **on the ip they resolve to**
+and a label may be exactly `*`: a wildcard for one label; `dns/hosts.rs` has the matching and
+priority rules). On disk they live **on the ip they resolve to**
 (`[[ips]] … hosts = ["app.obd.internal"]`, in the subnet's file), so a host can't outlive its ip.
 Hostnames are unique across every subnet. An ip with hosts can't be deallocated, and neither can
 anything containing it, even with `--recursive`. DNS reads a host table (`dns::SharedHosts`) that
