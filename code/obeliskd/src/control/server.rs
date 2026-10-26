@@ -10,7 +10,9 @@ use axum::{Json, Router};
 use std::sync::Arc;
 
 use super::Peer;
-use super::api::{DaemonInfo, ErrorBody, Health, SupernetAlloc};
+use super::api::{
+    DaemonInfo, ErrorBody, Health, SubnetAlloc, SubnetEntry, SubnetQuery, SupernetAlloc,
+};
 use super::auth::Admin;
 use crate::model::Supernet;
 use crate::state::Store;
@@ -69,6 +71,7 @@ impl From<ObeliskdError> for ApiError {
         let status = match error {
             ObeliskdError::Invalid(_) => StatusCode::BAD_REQUEST,
             ObeliskdError::Conflict(_) => StatusCode::CONFLICT,
+            ObeliskdError::NotFound(_) => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError {
@@ -100,6 +103,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/supernets", get(list_supernets).post(alloc_supernet))
+        .route("/subnets", get(list_subnets).post(alloc_subnet))
         .with_state(state)
 }
 
@@ -132,6 +136,45 @@ async fn alloc_supernet(
         .alloc_supernet(request.name, request.cidr)
         .await?;
     Ok((StatusCode::CREATED, Json(supernet)))
+}
+
+async fn list_subnets(
+    State(state): State<AppState>,
+    query: Result<axum::extract::Query<SubnetQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<Vec<SubnetEntry>>, ApiError> {
+    let axum::extract::Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    let subnets = state.store.subnets(query.supernet.as_ref()).await?;
+    Ok(Json(
+        subnets
+            .into_iter()
+            .map(|(supernet, subnet)| SubnetEntry { supernet, subnet })
+            .collect(),
+    ))
+}
+
+async fn alloc_subnet(
+    _: Admin,
+    State(state): State<AppState>,
+    request: Result<Json<SubnetAlloc>, axum::extract::rejection::JsonRejection>,
+) -> Result<(StatusCode, Json<SubnetEntry>), ApiError> {
+    let Json(request) = request.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    let subnet = state
+        .store
+        .alloc_subnet(
+            &request.supernet,
+            request.name,
+            request.kind,
+            request.size,
+            request.reserve_size,
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(SubnetEntry {
+            supernet: request.supernet,
+            subnet,
+        }),
+    ))
 }
 
 //
@@ -276,6 +319,48 @@ mod tests {
         let (status, body) = get_json(app(dir.path(), stranger), "/supernets").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn subnets_alloc_and_list_over_the_api() {
+        let dir = tempfile::tempdir().unwrap();
+        post_json(
+            app(dir.path(), ROOT),
+            "/supernets",
+            serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16" }),
+        )
+        .await;
+
+        let request = serde_json::json!({ "supernet": "obd", "name": "k3d-dev", "kind": "docker", "size": 24,
+            "reserveSize": 26 });
+        let (status, body) = post_json(app(dir.path(), ROOT), "/subnets", request).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let dev = serde_json::json!({
+            "supernet": "obd", "name": "k3d-dev", "kind": "docker",
+            "cidr": "10.57.0.0/24", "dockerRange": "10.57.0.0/26",
+            "dockerGateway": "10.57.0.1",
+        });
+        assert_eq!(body, dev);
+
+        let stranger = Peer {
+            uid: 4242,
+            gid: 4242,
+            pid: None,
+        };
+        let (status, body) = get_json(app(dir.path(), stranger), "/subnets?supernet=obd").await;
+        assert_eq!(status, StatusCode::OK, "reads are open");
+        assert_eq!(body, serde_json::json!([dev]));
+
+        let (status, _) = get_json(app(dir.path(), ROOT), "/subnets?supernet=nope").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let no_reserve =
+            serde_json::json!({ "supernet": "obd", "name": "x", "kind": "docker", "size": 24 });
+        let (status, _) = post_json(app(dir.path(), ROOT), "/subnets", no_reserve).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let request =
+            serde_json::json!({ "supernet": "obd", "name": "x", "kind": "host", "size": 24 });
+        let (status, _) = post_json(app(dir.path(), stranger), "/subnets", request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

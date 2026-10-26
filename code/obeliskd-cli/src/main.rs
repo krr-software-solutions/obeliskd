@@ -4,9 +4,9 @@ use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
-use obeliskd::control::api::SupernetAlloc;
+use obeliskd::control::api::{SubnetAlloc, SubnetQuery, SupernetAlloc};
 use obeliskd::control::client::ControlClient;
-use obeliskd::model::Name;
+use obeliskd::model::{Name, SubnetKind};
 use obeliskd::{ObeliskdError, Platform, PlatformImpl};
 use serde::Serialize;
 
@@ -43,6 +43,11 @@ enum Command {
     Supernet {
         #[command(subcommand)]
         command: SupernetCommand,
+    },
+    /// Subnets: ranges carved from a supernet, each `host` or `docker`
+    Subnet {
+        #[command(subcommand)]
+        command: SubnetCommand,
     },
     /// Print a shell completion script
     Completions { shell: clap_complete::Shell },
@@ -93,6 +98,57 @@ enum SupernetCommand {
         #[command(flatten)]
         output: Output,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum SubnetCommand {
+    /// List subnets (all, or one supernet's)
+    List {
+        /// Only this supernet's subnets
+        #[arg(long)]
+        supernet: Option<Name>,
+        #[command(flatten)]
+        output: Output,
+    },
+    /// Carve the first free range of a size out of a supernet (root only)
+    Alloc {
+        /// The supernet to carve it from
+        #[arg(long)]
+        supernet: Name,
+        /// Its name, unique within the supernet, e.g. `k3d-dev`
+        #[arg(long)]
+        subnet: Name,
+        /// What its addresses are for
+        #[arg(long, value_enum)]
+        kind: KindArg,
+        /// Its size as a prefix length, e.g. `24`; obeliskd picks the first free range
+        #[arg(long, value_name = "PREFIX-LENGTH")]
+        size: u8,
+        /// Docker only, and required there: the size of Docker's own slice at the start of the
+        /// subnet, as a prefix length (e.g. `26` in a /24: Docker gets .0–.63)
+        #[arg(long, value_name = "PREFIX-LENGTH", required_if_eq("kind", "docker"))]
+        reserve_size: Option<u8>,
+        #[command(flatten)]
+        output: Output,
+    },
+}
+
+/// `--kind`: what a subnet's addresses are for.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum KindArg {
+    /// Owned by this machine: host apps bind them
+    Host,
+    /// A Docker network: containers and MetalLB-pinned Services claim them
+    Docker,
+}
+
+impl From<KindArg> for SubnetKind {
+    fn from(kind: KindArg) -> Self {
+        match kind {
+            KindArg::Host => SubnetKind::Host,
+            KindArg::Docker => SubnetKind::Docker,
+        }
+    }
 }
 
 /// How a client command prints the daemon's answer.
@@ -157,6 +213,28 @@ async fn command_supernet_alloc(
     Ok(())
 }
 
+async fn command_subnet_list(
+    socket: &Path,
+    supernet: Option<Name>,
+    output: &Output,
+) -> Result<(), ObeliskdError> {
+    let subnets = ControlClient::new(socket)?
+        .subnets(&SubnetQuery { supernet })
+        .await?;
+    output.print(&subnets, |s| pretty::subnets(s));
+    Ok(())
+}
+
+async fn command_subnet_alloc(
+    socket: &Path,
+    request: SubnetAlloc,
+    output: &Output,
+) -> Result<(), ObeliskdError> {
+    let subnet = ControlClient::new(socket)?.alloc_subnet(&request).await?;
+    output.print(&subnet, pretty::subnet_allocated);
+    Ok(())
+}
+
 fn command_completions(shell: clap_complete::Shell) {
     let mut cmd = command();
     let name = cmd.get_name().to_string();
@@ -215,6 +293,28 @@ async fn main_impl() -> Result<(), ObeliskdError> {
                 cidr,
                 output,
             } => command_supernet_alloc(&socket, supernet, cidr, &output).await,
+        },
+        Command::Subnet { command } => match command {
+            SubnetCommand::List { supernet, output } => {
+                command_subnet_list(&socket, supernet, &output).await
+            }
+            SubnetCommand::Alloc {
+                supernet,
+                subnet,
+                kind,
+                size,
+                reserve_size,
+                output,
+            } => {
+                let request = SubnetAlloc {
+                    supernet,
+                    name: subnet,
+                    kind: kind.into(),
+                    size,
+                    reserve_size,
+                };
+                command_subnet_alloc(&socket, request, &output).await
+            }
         },
         Command::Completions { shell } => {
             command_completions(shell);

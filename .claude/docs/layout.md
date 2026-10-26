@@ -23,12 +23,19 @@ socket, and serves both until the shutdown signal.
 - `model/`: the allocation model and its validation. `Name` follows the hostname-label rules
   (lowercase LDH, at most 63 characters, no `--` in positions 3–4), so a name works as a DNS label,
   a docker network name and a k8s name. `Supernet` is a name plus an IPv4 CIDR; it must be the
-  start of its range and must not overlap another supernet.
+  start of its range and must not overlap another supernet. `Subnet` (nested in its supernet) has
+  a kind (`host` | `docker`) and a CIDR that **obeliskd always picks**: the first free, aligned
+  range of the requested `--size`. There's no `--cidr`. A docker subnet also records
+  `dockerRange`, Docker's own slice at the start of the subnet (`--reserve-size`, required for
+  docker and refused for host), and `dockerGateway`, the host's address on the network (always the
+  subnet's first usable address, inside the slice). obeliskd will only hand out addresses outside
+  that slice.
 - `state.rs`: `Store`, which holds `config.toml` loaded in memory behind a mutex. Every change is
   validated, saved atomically, and only then made visible.
 
-The tree is supernet → subnet → ip; only supernets exist so far. Subnets will carry the
-kind (`host` | `docker`).
+The tree is supernet → subnet → ip; supernets and subnets exist so far, as bookkeeping. Making
+them real on the OS (a Linux `local` route for host subnets, `docker network create` for docker
+ones) comes next.
 
 ## The control API (`code/obeliskd/src/control/`)
 

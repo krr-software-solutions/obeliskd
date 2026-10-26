@@ -34,6 +34,9 @@ pub enum ObeliskdError {
     #[error("{0}")]
     Conflict(String),
 
+    #[error("{0}")]
+    NotFound(String),
+
     #[error("state dir {}: {message}", path.display())]
     StateDir { path: PathBuf, message: String },
 

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::api::{ErrorBody, Health, SupernetAlloc};
+use super::api::{ErrorBody, Health, SubnetAlloc, SubnetEntry, SubnetQuery, SupernetAlloc};
 use crate::model::Supernet;
 use crate::{ObeliskdError, Platform, PlatformImpl};
 
@@ -51,6 +51,24 @@ impl ControlClient {
     /// If the daemon can't be reached, or refuses (e.g. a name taken or an overlap).
     pub async fn alloc_supernet(&self, request: &SupernetAlloc) -> Result<Supernet, ObeliskdError> {
         self.post("/supernets", request).await
+    }
+
+    /// `GET /subnets`, optionally only one supernet's.
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or answers with an error (e.g. an unknown supernet).
+    pub async fn subnets(&self, query: &SubnetQuery) -> Result<Vec<SubnetEntry>, ObeliskdError> {
+        self.send(self.http.get(url("/subnets")).query(query)).await
+    }
+
+    /// `POST /subnets`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or refuses (e.g. an overlap, or no free range).
+    pub async fn alloc_subnet(&self, request: &SubnetAlloc) -> Result<SubnetEntry, ObeliskdError> {
+        self.post("/subnets", request).await
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ObeliskdError> {

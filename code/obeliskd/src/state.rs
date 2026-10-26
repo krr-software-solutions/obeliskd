@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::ObeliskdError;
-use crate::model::{Name, Supernet, supernet};
+use crate::model::subnet::{self, PlaceError};
+use crate::model::{Name, Subnet, SubnetKind, Supernet, supernet};
 
 pub const CONFIG_FILE: &str = "config.toml";
 
@@ -39,12 +40,22 @@ impl Store {
     /// risk overwriting state it couldn't understand.
     pub fn load(dir: &Path) -> Result<Self, ObeliskdError> {
         let path = dir.join(CONFIG_FILE);
-        let config = match std::fs::read_to_string(&path) {
+        let mut config: Config = match std::fs::read_to_string(&path) {
             Ok(text) => toml::from_str(&text)
                 .map_err(|source| ObeliskdError::StateParse { path, source })?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
             Err(source) => return Err(ObeliskdError::StateRead { path, source }),
         };
+        // Docker subnets saved before the gateway was recorded: it's always derivable.
+        for subnet in config
+            .supernets
+            .iter_mut()
+            .flat_map(|s| s.subnets.iter_mut())
+        {
+            if subnet.docker_range.is_some() && subnet.docker_gateway.is_none() {
+                subnet.docker_gateway = Some(subnet::docker_gateway(subnet.cidr));
+            }
+        }
         Ok(Store {
             dir: dir.to_path_buf(),
             config: Mutex::new(config),
@@ -81,12 +92,112 @@ impl Store {
             )));
         }
 
-        let supernet = Supernet { name, cidr };
+        let supernet = Supernet {
+            name,
+            cidr,
+            subnets: Vec::new(),
+        };
         let mut next = config.clone();
         next.supernets.push(supernet.clone());
         save(&self.dir, &next)?;
         *config = next;
         Ok(supernet)
+    }
+}
+
+impl Store {
+    /// Every subnet, with the name of the supernet it's in; optionally only one supernet's.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::NotFound`] if `supernet` names one that doesn't exist.
+    pub async fn subnets(
+        &self,
+        supernet: Option<&Name>,
+    ) -> Result<Vec<(Name, Subnet)>, ObeliskdError> {
+        let config = self.config.lock().await;
+        if let Some(name) = supernet {
+            if !config.supernets.iter().any(|s| &s.name == name) {
+                return Err(ObeliskdError::NotFound(format!("no supernet {name}")));
+            }
+        }
+        Ok(config
+            .supernets
+            .iter()
+            .filter(|s| supernet.is_none_or(|name| &s.name == name))
+            .flat_map(|s| s.subnets.iter().map(|sub| (s.name.clone(), sub.clone())))
+            .collect())
+    }
+
+    /// Carves the first free `/size` out of `supernet`, and saves.
+    ///
+    /// `reserve` is the prefix length of Docker's slice: required for docker subnets, refused for
+    /// host ones.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::NotFound`] for an unknown supernet; [`ObeliskdError::Invalid`] for a size
+    /// or reserve that can't work; [`ObeliskdError::Conflict`] if the name is taken in that
+    /// supernet, the range overlaps a sibling, or no range of that size is free; or a failure to
+    /// save (then nothing changes).
+    pub async fn alloc_subnet(
+        &self,
+        supernet: &Name,
+        name: Name,
+        kind: SubnetKind,
+        size: u8,
+        reserve: Option<u8>,
+    ) -> Result<Subnet, ObeliskdError> {
+        let mut config = self.config.lock().await;
+        let mut next = config.clone();
+        let parent = next
+            .supernets
+            .iter_mut()
+            .find(|s| &s.name == supernet)
+            .ok_or_else(|| ObeliskdError::NotFound(format!("no supernet {supernet}")))?;
+        if parent.subnets.iter().any(|s| s.name == name) {
+            return Err(ObeliskdError::Conflict(format!(
+                "subnet {supernet}/{name} already exists"
+            )));
+        }
+        match (kind, reserve) {
+            (SubnetKind::Host, Some(_)) => {
+                return Err(ObeliskdError::Invalid(
+                    "--reserve-size is only for docker subnets".to_string(),
+                ));
+            }
+            (SubnetKind::Docker, None) => {
+                return Err(ObeliskdError::Invalid(
+                    "docker subnets need --reserve-size (the size of Docker's own slice)"
+                        .to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        let taken: Vec<Ipv4Net> = parent.subnets.iter().map(|s| s.cidr).collect();
+        let cidr = subnet::place(parent.cidr, &taken, size).map_err(|e| match e {
+            PlaceError::Invalid(m) => ObeliskdError::Invalid(m),
+            PlaceError::Conflict(m) => ObeliskdError::Conflict(m),
+        })?;
+        let docker_range = match reserve {
+            None => None,
+            Some(reserve) => {
+                Some(subnet::docker_range(cidr, reserve).map_err(ObeliskdError::Invalid)?)
+            }
+        };
+
+        let subnet = Subnet {
+            name,
+            kind,
+            cidr,
+            docker_range,
+            docker_gateway: docker_range.map(|_| subnet::docker_gateway(cidr)),
+        };
+        parent.subnets.push(subnet.clone());
+        save(&self.dir, &next)?;
+        *config = next;
+        Ok(subnet)
     }
 }
 
@@ -139,7 +250,8 @@ mod tests {
             reloaded.supernets().await,
             vec![Supernet {
                 name: name("obd"),
-                cidr: "10.57.0.0/16".parse().unwrap()
+                cidr: "10.57.0.0/16".parse().unwrap(),
+                subnets: Vec::new(),
             }]
         );
 
@@ -181,6 +293,98 @@ mod tests {
             .await;
         assert!(matches!(unaligned, Err(ObeliskdError::Invalid(_))));
         assert_eq!(store.supernets().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn subnets_nest_in_their_supernet_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        let obd = name("obd");
+        store
+            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .await
+            .unwrap();
+
+        let host = store
+            .alloc_subnet(&obd, name("host"), SubnetKind::Host, 24, None)
+            .await
+            .unwrap();
+        assert_eq!(host.cidr, "10.57.0.0/24".parse().unwrap());
+        assert_eq!(host.docker_range, None);
+
+        let dev = store
+            .alloc_subnet(&obd, name("k3d-dev"), SubnetKind::Docker, 24, Some(26))
+            .await
+            .unwrap();
+        assert_eq!(
+            dev.cidr,
+            "10.57.1.0/24".parse().unwrap(),
+            "the next free /24"
+        );
+        assert_eq!(dev.docker_range, Some("10.57.1.0/26".parse().unwrap()));
+        assert_eq!(dev.docker_gateway, Some("10.57.1.1".parse().unwrap()));
+        assert_eq!(host.docker_gateway, None);
+
+        let reloaded = Store::load(dir.path()).unwrap();
+        let all = reloaded.subnets(None).await.unwrap();
+        assert_eq!(all, vec![(obd.clone(), host), (obd.clone(), dev)]);
+        let text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("[[supernets.subnets]]"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn subnet_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        let obd = name("obd");
+        store
+            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .await
+            .unwrap();
+        store
+            .alloc_subnet(&obd, name("host"), SubnetKind::Host, 24, None)
+            .await
+            .unwrap();
+
+        let unknown = store
+            .alloc_subnet(&name("nope"), name("x"), SubnetKind::Host, 24, None)
+            .await;
+        assert!(matches!(unknown, Err(ObeliskdError::NotFound(_))));
+        let taken = store
+            .alloc_subnet(&obd, name("host"), SubnetKind::Host, 24, None)
+            .await;
+        assert!(matches!(taken, Err(ObeliskdError::Conflict(_))));
+        let host_reserve = store
+            .alloc_subnet(&obd, name("x"), SubnetKind::Host, 24, Some(26))
+            .await;
+        assert!(matches!(host_reserve, Err(ObeliskdError::Invalid(_))));
+        let docker_no_reserve = store
+            .alloc_subnet(&obd, name("x"), SubnetKind::Docker, 24, None)
+            .await;
+        assert!(matches!(docker_no_reserve, Err(ObeliskdError::Invalid(_))));
+        let tiny_docker = store
+            .alloc_subnet(&obd, name("x"), SubnetKind::Docker, 30, Some(31))
+            .await;
+        assert!(matches!(tiny_docker, Err(ObeliskdError::Invalid(_))));
+        assert!(matches!(
+            store.subnets(Some(&name("nope"))).await,
+            Err(ObeliskdError::NotFound(_))
+        ));
+        assert_eq!(
+            store.subnets(None).await.unwrap().len(),
+            1,
+            "failed allocs change nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn fills_in_gateways_missing_from_older_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let older = "[[supernets]]\nname = \"ex1\"\ncidr = \"10.57.0.0/16\"\n\n[[supernets.subnets]]\nname = \"ex1-6\"\nkind = \"docker\"\ncidr = \"10.57.16.0/22\"\ndockerRange = \"10.57.16.0/28\"\n";
+        std::fs::write(dir.path().join(CONFIG_FILE), older).unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        let (_, subnet) = &store.subnets(None).await.unwrap()[0];
+        assert_eq!(subnet.docker_gateway, Some("10.57.16.1".parse().unwrap()));
     }
 
     #[test]
