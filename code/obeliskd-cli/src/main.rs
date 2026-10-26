@@ -186,6 +186,15 @@ enum HostCommand {
         #[command(flatten)]
         output: Output,
     },
+    /// Print the address a name resolves to, as DNS answers it (wildcards included), for scripts:
+    /// exits 0 if something matches, 1 if not, 2 on any other error
+    Resolve {
+        /// The full name to resolve, e.g. `app.obd.internal`
+        #[arg(long)]
+        host: Hostname,
+        #[command(flatten)]
+        output: ResolveOutput,
+    },
     /// Point a hostname at an ip (needs use on its subnet)
     Alloc {
         /// The full hostname, e.g. `app.obd.internal`
@@ -424,7 +433,7 @@ enum Format {
     Json,
 }
 
-/// `ip resolve`'s own `--format`: made for scripts.
+/// The `resolve` commands' own `--format`: made for scripts.
 #[derive(Debug, Args)]
 #[command(next_help_heading = EXTRA)]
 struct ResolveOutput {
@@ -437,7 +446,7 @@ struct ResolveOutput {
 enum ResolveFormat {
     /// Just the address (nothing if not found)
     Simple,
-    /// `{ supernet, subnet, ip }`, side by side (`null` if not found)
+    /// `{ supernet, subnet, ip }` side by side (`host resolve`: and `match`), `null` if not found
     Json,
 }
 
@@ -737,9 +746,28 @@ async fn command_ip_resolve(
         Ok(client) => client.ip(supernet, subnet, ip).await,
         Err(error) => Err(error),
     };
+    print_resolved(found, output, |f| f.ip.address)
+}
+
+/// `host resolve`: as `ip resolve`, for a name (wildcards included, as DNS answers it).
+async fn command_host_resolve(socket: &Path, host: &Hostname, output: &ResolveOutput) -> ExitCode {
+    let found = match ControlClient::new(socket) {
+        Ok(client) => client.resolve_host(host).await,
+        Err(error) => Err(error),
+    };
+    print_resolved(found, output, |f| f.ip.address)
+}
+
+/// The `resolve` commands' output and exit codes: 0 found, 1 not found (`simple` prints nothing,
+/// `json` prints `null`), 2 any other error (on stderr).
+fn print_resolved<T: Serialize>(
+    found: Result<Option<T>, ObeliskdError>,
+    output: &ResolveOutput,
+    address: impl FnOnce(&T) -> std::net::Ipv4Addr,
+) -> ExitCode {
     match (found, output.format) {
         (Ok(Some(found)), ResolveFormat::Simple) => {
-            println!("{}", found.ip.address);
+            println!("{}", address(&found));
             ExitCode::SUCCESS
         }
         (Ok(Some(found)), ResolveFormat::Json) => {
@@ -818,6 +846,7 @@ async fn run_ip(socket: &Path, command: IpCommand) -> Result<(), ObeliskdError> 
 async fn run_host(socket: &Path, command: HostCommand) -> Result<(), ObeliskdError> {
     match command {
         HostCommand::List { output } => command_host_list(socket, &output).await,
+        HostCommand::Resolve { .. } => unreachable!("main_impl runs host resolve itself"),
         HostCommand::Alloc {
             host,
             supernet,
@@ -902,18 +931,21 @@ async fn main_impl() -> Result<ExitCode, ObeliskdError> {
     let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
     let socket: PathBuf = cli.socket;
 
-    // The one command with exit codes of its own.
-    if let Command::Ip {
-        command:
-            IpCommand::Resolve {
-                supernet,
-                subnet,
-                ip,
-                output,
-            },
-    } = &cli.command
-    {
-        return Ok(command_ip_resolve(&socket, supernet, subnet, ip, output).await);
+    // The commands with exit codes of their own.
+    match &cli.command {
+        Command::Ip {
+            command:
+                IpCommand::Resolve {
+                    supernet,
+                    subnet,
+                    ip,
+                    output,
+                },
+        } => return Ok(command_ip_resolve(&socket, supernet, subnet, ip, output).await),
+        Command::Host {
+            command: HostCommand::Resolve { host, output },
+        } => return Ok(command_host_resolve(&socket, host, output).await),
+        _ => {}
     }
 
     match cli.command {

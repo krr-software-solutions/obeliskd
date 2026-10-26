@@ -167,7 +167,7 @@ mod tests {
     use crate::control::api::DaemonInfo;
     use crate::control::client::ControlClient;
     use crate::control::server::{AppState, serve};
-    use crate::model::{Actor, Name, SubnetKind};
+    use crate::model::{Actor, Host, Hostname, Name, SubnetKind};
     use crate::state::Store;
     use crate::{Platform, PlatformImpl};
 
@@ -229,6 +229,34 @@ mod tests {
         assert_eq!(client.ip(&obd, &name("a"), &name("x")).await.unwrap(), None);
         assert_eq!(
             client.ip(&obd, &name("x"), &name("db")).await.unwrap(),
+            None
+        );
+
+        let host = |h: &str| Hostname::parse(h).unwrap();
+        store
+            .alloc_host(
+                root,
+                Host {
+                    name: host("*.obd.internal"),
+                    supernet: obd.clone(),
+                    subnet: name("a"),
+                    ip: name("db"),
+                },
+            )
+            .await
+            .unwrap();
+        let found = client
+            .resolve_host(&host("app.obd.internal"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.matched.host, host("*.obd.internal"));
+        assert_eq!(found.ip.address, Ipv4Addr::new(10, 57, 0, 1));
+        assert_eq!(
+            client
+                .resolve_host(&host("a.b.obd.internal"))
+                .await
+                .unwrap(),
             None
         );
 

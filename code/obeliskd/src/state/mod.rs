@@ -886,6 +886,17 @@ impl Store {
     }
 }
 
+/// What a name resolves to (see [`Store::resolve`]): the supernet and subnet without their
+/// children, the ip, the host that matched, and the hosts it shadows (best first).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resolved {
+    pub supernet: Supernet,
+    pub subnet: Subnet,
+    pub ip: Ip,
+    pub host: Hostname,
+    pub shadowed: Vec<Hostname>,
+}
+
 /// A host, with the address it currently resolves to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostIn {
@@ -903,6 +914,59 @@ impl Store {
             .collect();
         hosts.sort_by(|a, b| a.host.name.cmp(&b.host.name));
         hosts
+    }
+
+    /// What DNS answers `name` with: the host that wins (exact, else the most specific pattern),
+    /// where its ip lives, and the other hosts that match but lose to it. `None` if nothing
+    /// matches.
+    ///
+    /// # Panics
+    ///
+    /// Never: the host table is rebuilt from the config on every change, under the same lock.
+    pub async fn resolve(&self, name: &Hostname) -> Option<Resolved> {
+        let config = self.config.lock().await;
+        let table = Arc::clone(
+            &self
+                .hosts
+                .read()
+                .expect("the host table lock is never poisoned"),
+        );
+        let mut matching = table.matching(name.as_str()).into_iter();
+        let winner = matching.next()?;
+        let (host, _) = config
+            .hosts()
+            .find(|(h, _)| h.name.as_str() == winner)
+            .expect("every host in the table is in the config");
+        let supernet = config
+            .supernets
+            .iter()
+            .find(|s| s.name == host.supernet)
+            .expect("a host's supernet exists");
+        let subnet = supernet
+            .subnets
+            .iter()
+            .find(|s| s.name == host.subnet)
+            .expect("a host's subnet exists");
+        let ip = subnet
+            .ips
+            .iter()
+            .find(|i| i.name == host.ip)
+            .expect("a host's ip exists");
+        Some(Resolved {
+            supernet: Supernet {
+                subnets: Vec::new(),
+                ..supernet.clone()
+            },
+            subnet: Subnet {
+                ips: Vec::new(),
+                ..subnet.clone()
+            },
+            ip: ip.clone(),
+            host: host.name,
+            shadowed: matching
+                .map(|h| Hostname::parse(&h).expect("hosts in the table are valid"))
+                .collect(),
+        })
     }
 
     /// Points a hostname at an ip (it's saved on the ip, in its subnet's file), and saves. DNS

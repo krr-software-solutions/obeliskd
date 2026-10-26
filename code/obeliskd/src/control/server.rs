@@ -13,9 +13,9 @@ use std::sync::Arc;
 use super::Peer;
 use super::api::{
     DaemonInfo, Depth, EffectiveNode, ErrorBody, GrantAdd, GrantCheck, GrantCheckQuery, GrantNode,
-    GrantQuery, Health, HostAlloc, IpAlloc, IpDealloc, IpDeallocTagged, IpNode, IpQuery,
-    IpResolved, SubnetAlloc, SubnetDealloc, SubnetNode, SubnetQuery, SupernetAlloc,
-    SupernetDealloc, SupernetNode, Who, WhoArg,
+    GrantQuery, Health, HostAlloc, HostMatch, HostResolved, IpAlloc, IpDealloc, IpDeallocTagged,
+    IpNode, IpQuery, IpResolved, SubnetAlloc, SubnetDealloc, SubnetNode, SubnetQuery,
+    SupernetAlloc, SupernetDealloc, SupernetNode, Who, WhoArg,
 };
 use crate::model::{Actor, Grant, Host, Hostname, Principal, Scope};
 use crate::model::{Name, Supernet};
@@ -124,6 +124,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/hosts", get(list_hosts).post(alloc_host))
         .route("/hosts/{host}", delete(dealloc_host))
+        .route("/resolve/{name}", get(resolve_host))
         .route(
             "/grants",
             get(list_grants).post(add_grant).delete(remove_grant),
@@ -418,6 +419,27 @@ async fn dealloc_ips_tagged(
 async fn list_hosts(State(state): State<AppState>) -> Result<Json<Vec<SupernetNode>>, ApiError> {
     let tree = state.store.tree(None, None).await?;
     Ok(Json(nodes(&tree, Depth::Hosts)))
+}
+
+async fn resolve_host(
+    State(state): State<AppState>,
+    name: Result<axum::extract::Path<Hostname>, PathRejection>,
+) -> Result<Json<HostResolved>, ApiError> {
+    let name = path(name)?;
+    let found = state
+        .store
+        .resolve(&name)
+        .await
+        .ok_or_else(|| ObeliskdError::NotFound(format!("nothing matches {name}")))?;
+    Ok(Json(HostResolved {
+        supernet: SupernetNode::of(&found.supernet, Depth::Supernets),
+        subnet: SubnetNode::of(&found.subnet, Depth::Subnets),
+        ip: IpNode::of(&found.ip, Depth::Hosts),
+        matched: HostMatch {
+            host: found.host,
+            shadowed: found.shadowed,
+        },
+    }))
 }
 
 async fn alloc_host(
@@ -1182,6 +1204,74 @@ mod tests {
             let (status, _) = get_json(root(), missing).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
         }
+    }
+
+    #[tokio::test]
+    async fn resolving_a_name_shows_the_match_and_what_it_shadows() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = || app(dir.path(), ROOT);
+        post_json(
+            root(),
+            "/supernets",
+            serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16" }),
+        )
+        .await;
+        post_json(
+            root(),
+            "/subnets",
+            serde_json::json!({ "supernet": "obd", "name": "a", "kind": "host", "size": 24 }),
+        )
+        .await;
+        for (ip, hosts) in [
+            ("any", &["*.*.x.obd.internal"][..]),
+            ("app", &["*.b.x.obd.internal", "c.b.x.obd.internal"][..]),
+        ] {
+            post_json(
+                root(),
+                "/ips",
+                serde_json::json!({ "supernet": "obd", "subnet": "a", "name": ip }),
+            )
+            .await;
+            for host in hosts {
+                post_json(
+                    root(),
+                    "/hosts",
+                    serde_json::json!({ "name": host, "supernet": "obd", "subnet": "a", "ip": ip }),
+                )
+                .await;
+            }
+        }
+
+        // Anyone may ask.
+        let (status, body) = get_json(app(dir.path(), USER), "/resolve/q.b.x.obd.internal").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "supernet": { "name": "obd", "cidr": "10.57.0.0/16" },
+                "subnet": { "name": "a", "kind": "host", "cidr": "10.57.0.0/24" },
+                "ip": { "name": "app", "address": "10.57.0.2", "hosts": ["*.b.x.obd.internal", "c.b.x.obd.internal"] },
+                "match": { "host": "*.b.x.obd.internal", "shadowed": ["*.*.x.obd.internal"] },
+            })
+        );
+        let (_, body) = get_json(root(), "/resolve/c.b.x.obd.internal").await;
+        assert_eq!(
+            body["match"],
+            serde_json::json!({ "host": "c.b.x.obd.internal", "shadowed": ["*.b.x.obd.internal", "*.*.x.obd.internal"] }),
+            "an exact name beats every pattern"
+        );
+        let (_, body) = get_json(root(), "/resolve/q.r.x.obd.internal").await;
+        assert_eq!(body["ip"]["name"], "any");
+        assert_eq!(body["match"]["shadowed"], serde_json::json!([]));
+
+        let (status, _) = get_json(root(), "/resolve/b.x.obd.internal").await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "hosts below it, but no match"
+        );
+        let (status, _) = get_json(root(), "/resolve/example.com").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "outside the zone");
     }
 
     #[tokio::test]

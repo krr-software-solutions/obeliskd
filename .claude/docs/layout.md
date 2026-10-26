@@ -77,8 +77,11 @@ the store swaps after every change, so queries never wait on the store's lock.
 `ip resolve --supernet … --subnet … --ip …` is for scripts (`GET /ips/{supernet}/{subnet}/{ip}`,
 open to anyone). It has its own `--format simple|json` (default `simple`: just the address) and
 exit codes: **0** found, **1** not found (the supernet, subnet or ip; `simple` prints nothing, `json`
-prints `null`), **2** any other error, on stderr. Commands that need other formats get their own
-`--format` enum like this one rather than sharing `Output`.
+prints `null`), **2** any other error, on stderr. `host resolve --host <name>` is the same for a
+name, answered exactly as DNS would (wildcards included; `GET /resolve/{name}`). Its `json` adds
+`match: { host, shadowed }`: the host that answered, and the other hosts that match the name but
+lose to it, best first (`HostTable::matching`). Commands that need other formats get their own
+`--format` enum like these rather than sharing `Output`.
 
 Ip names are unique within their subnet. An ip may carry **one optional `tag`** (`ip alloc --tag
 pr-42`, name rules): a group label, a sort of "sub-sub-net", so a set of ips can be found together

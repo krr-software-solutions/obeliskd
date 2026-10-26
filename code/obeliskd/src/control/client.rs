@@ -7,8 +7,8 @@ use serde::de::DeserializeOwned;
 
 use super::api::{
     ErrorBody, GrantAdd, GrantCheck, GrantCheckQuery, GrantNode, GrantQuery, Health, HostAlloc,
-    IpAlloc, IpDealloc, IpDeallocTagged, IpQuery, IpResolved, SubnetAlloc, SubnetDealloc,
-    SubnetQuery, SupernetAlloc, SupernetDealloc, SupernetNode,
+    HostResolved, IpAlloc, IpDealloc, IpDeallocTagged, IpQuery, IpResolved, SubnetAlloc,
+    SubnetDealloc, SubnetQuery, SupernetAlloc, SupernetDealloc, SupernetNode,
 };
 use crate::model::{Hostname, Name};
 use crate::{ObeliskdError, Platform, PlatformImpl};
@@ -220,6 +220,22 @@ impl ControlClient {
     /// If the daemon can't be reached, or answers with an error.
     pub async fn hosts(&self) -> Result<Vec<SupernetNode>, ObeliskdError> {
         self.get("/hosts").await
+    }
+
+    /// `GET /resolve/{name}`: what DNS answers `name` with, or `None` if nothing matches it.
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or answers with any other error.
+    pub async fn resolve_host(
+        &self,
+        name: &Hostname,
+    ) -> Result<Option<HostResolved>, ObeliskdError> {
+        match self.get(&format!("/resolve/{name}")).await {
+            Ok(found) => Ok(Some(found)),
+            Err(ObeliskdError::ControlStatus { status: 404, .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// `POST /hosts`

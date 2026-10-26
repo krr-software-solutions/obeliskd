@@ -33,6 +33,26 @@ impl HostTable {
             .map(|&(_, address)| address)
     }
 
+    /// Every host that matches `name`, the one [`lookup`](Self::lookup) answers with first: the
+    /// exact name if there is one, then the patterns from most to least specific.
+    #[must_use]
+    pub fn matching(&self, name: &str) -> Vec<String> {
+        let labels = reversed(name);
+        let mut patterns: Vec<&Vec<String>> = self
+            .patterns
+            .iter()
+            .map(|(pattern, _)| pattern)
+            .filter(|pattern| matches(pattern, &labels))
+            .collect();
+        patterns.sort_by_key(|pattern| std::cmp::Reverse(specificity(pattern)));
+        self.exact
+            .contains_key(name)
+            .then(|| name.to_string())
+            .into_iter()
+            .chain(patterns.into_iter().map(|p| unreversed(p)))
+            .collect()
+    }
+
     /// Whether some host is strictly below `name`: then `name` exists too (an "empty non-terminal",
     /// RFC 8020), even without a record of its own.
     #[must_use]
@@ -67,6 +87,15 @@ impl<const N: usize> From<[(String, Ipv4Addr); N]> for HostTable {
 
 fn reversed(name: &str) -> Vec<String> {
     name.rsplit('.').map(str::to_string).collect()
+}
+
+fn unreversed(labels: &[String]) -> String {
+    labels
+        .iter()
+        .rev()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// Same length, and every label equal or `*` (both right to left).
@@ -119,6 +148,49 @@ mod tests {
         assert_eq!(lookup("a.q.x"), Some(2), "a.*.x beats *.*.x");
         assert_eq!(lookup("z.b.x"), Some(3), "*.b.x beats *.*.x");
         assert_eq!(lookup("p.q.x"), Some(1), "only *.*.x");
+    }
+
+    #[test]
+    fn matching_lists_the_winner_then_what_it_shadows() {
+        let t = HostTable::from([
+            (
+                "*.*.x.obd.internal".to_string(),
+                Ipv4Addr::new(10, 57, 0, 1),
+            ),
+            (
+                "a.*.x.obd.internal".to_string(),
+                Ipv4Addr::new(10, 57, 0, 2),
+            ),
+            (
+                "*.b.x.obd.internal".to_string(),
+                Ipv4Addr::new(10, 57, 0, 3),
+            ),
+            (
+                "a.b.x.obd.internal".to_string(),
+                Ipv4Addr::new(10, 57, 0, 4),
+            ),
+        ]);
+        assert_eq!(
+            t.matching("a.b.x.obd.internal"),
+            [
+                "a.b.x.obd.internal",
+                "*.b.x.obd.internal",
+                "a.*.x.obd.internal",
+                "*.*.x.obd.internal"
+            ]
+        );
+        assert_eq!(
+            t.matching("z.b.x.obd.internal"),
+            ["*.b.x.obd.internal", "*.*.x.obd.internal"]
+        );
+        assert_eq!(t.matching("q.x.obd.internal"), Vec::<String>::new());
+        // The first match is always the answer.
+        for name in ["a.b.x", "z.b.x", "a.q.x", "p.q.x", "c.d.x"] {
+            let name = format!("{name}.obd.internal");
+            let first = t.matching(&name).first().cloned();
+            let answer = first.and_then(|host| t.lookup(&host));
+            assert_eq!(answer, t.lookup(&name), "{name}");
+        }
     }
 
     #[test]

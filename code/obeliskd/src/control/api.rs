@@ -245,6 +245,25 @@ pub struct IpResolved {
     pub ip: IpNode,
 }
 
+/// `GET /resolve/{name}`: what DNS answers a name with, laid out like [`IpResolved`], plus which
+/// host matched it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostResolved {
+    pub supernet: SupernetNode,
+    pub subnet: SubnetNode,
+    pub ip: IpNode,
+    #[serde(rename = "match")]
+    pub matched: HostMatch,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostMatch {
+    /// The host that answers: the name itself, or the most specific wildcard matching it.
+    pub host: Hostname,
+    /// Other hosts that match the name too but lose to `host`, best first.
+    pub shadowed: Vec<Hostname>,
+}
+
 // ----- grants -----
 
 /// Who a grant is for, as the CLI names them (by name or number). Exactly one of `user`, `group`
