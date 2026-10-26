@@ -14,6 +14,7 @@ use obeliskd::{ObeliskdError, Platform, PlatformImpl};
 use serde::Serialize;
 
 mod pretty;
+mod status;
 
 //
 
@@ -107,6 +108,15 @@ enum SupernetCommand {
     List {
         #[command(flatten)]
         output: Output,
+    },
+    /// An overview of each supernet: sizes, subnets, and a grid of which blocks are taken
+    Status {
+        /// Only this supernet
+        #[arg(long)]
+        supernet: Option<Name>,
+        /// The grid's block size, as a prefix length (default: the supernet's + 8, i.e. 256 blocks)
+        #[arg(long, value_name = "PREFIX-LENGTH")]
+        block_size: Option<u8>,
     },
     /// Create a supernet (root only)
     Alloc {
@@ -687,9 +697,30 @@ async fn run_daemon(socket: &Path, command: DaemonCommand) -> Result<(), Obelisk
     }
 }
 
+async fn command_supernet_status(
+    socket: &Path,
+    supernet: Option<Name>,
+    block_size: Option<u8>,
+) -> Result<(), ObeliskdError> {
+    let query = IpQuery {
+        supernet,
+        ..IpQuery::default()
+    };
+    let tree = ControlClient::new(socket)?.ips(&query).await?;
+    let color = std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+    let out = status::render(&tree, block_size, color).map_err(ObeliskdError::Invalid)?;
+    print!("{out}");
+    Ok(())
+}
+
 async fn run_supernet(socket: &Path, command: SupernetCommand) -> Result<(), ObeliskdError> {
     match command {
         SupernetCommand::List { output } => command_supernet_list(socket, &output).await,
+        SupernetCommand::Status {
+            supernet,
+            block_size,
+        } => command_supernet_status(socket, supernet, block_size).await,
         SupernetCommand::Alloc {
             supernet,
             cidr,

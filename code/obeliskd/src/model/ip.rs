@@ -1,5 +1,7 @@
 use std::net::Ipv4Addr;
 
+use ipnet::Ipv4Net;
+
 use serde::{Deserialize, Serialize};
 
 use super::{Hostname, Name, Subnet, SubnetKind};
@@ -42,6 +44,42 @@ pub fn allocatable(subnet: &Subnet, address: Ipv4Addr) -> bool {
     }
 }
 
+/// How many addresses in `cidr` don't end in `.0` or `.255`.
+#[must_use]
+pub fn usable_count(cidr: Ipv4Net) -> u64 {
+    if cidr.prefix_len() <= 24 {
+        // Whole /24s: 254 of every 256.
+        (1u64 << (32 - cidr.prefix_len())) / 256 * 254
+    } else {
+        let (first, last) = (cidr.network().to_bits(), cidr.broadcast().to_bits());
+        (first..=last)
+            .filter(|&a| !matches!(a & 0xff, 0 | 255))
+            .count() as u64
+    }
+}
+
+/// How many addresses [`allocatable`] allows in a subnet of this shape, without walking them.
+#[must_use]
+pub fn allocatable_count(kind: SubnetKind, cidr: Ipv4Net, docker_range: Option<Ipv4Net>) -> u64 {
+    let usable = usable_count(cidr);
+    match kind {
+        SubnetKind::Host => usable,
+        SubnetKind::Docker => {
+            let in_range = |a: Ipv4Addr| docker_range.is_some_and(|r| r.contains(&a));
+            let ends_ok = |a: Ipv4Addr| !matches!(a.octets()[3], 0 | 255);
+            let mut edges = vec![cidr.network()];
+            if cidr.broadcast() != cidr.network() {
+                edges.push(cidr.broadcast());
+            }
+            let edges = edges
+                .into_iter()
+                .filter(|a| ends_ok(*a) && !in_range(*a))
+                .count() as u64;
+            usable - docker_range.map_or(0, usable_count) - edges
+        }
+    }
+}
+
 /// The lowest allocatable address in `subnet` that none of its ips have.
 #[must_use]
 pub fn pick(subnet: &Subnet) -> Option<Ipv4Addr> {
@@ -70,6 +108,35 @@ mod tests {
 
     fn addr(s: &str) -> Ipv4Addr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn counts_match_walking_every_address() {
+        let walk = |s: &Subnet| {
+            let (first, last) = (s.cidr.network().to_bits(), s.cidr.broadcast().to_bits());
+            (first..=last)
+                .filter(|&a| allocatable(s, Ipv4Addr::from_bits(a)))
+                .count() as u64
+        };
+        for (kind, cidr, range) in [
+            (SubnetKind::Host, "10.57.0.0/16", None),
+            (SubnetKind::Host, "10.57.0.0/24", None),
+            (SubnetKind::Host, "10.57.0.0/28", None),
+            (SubnetKind::Host, "10.57.0.240/28", None),
+            (SubnetKind::Host, "10.57.0.255/32", None),
+            (SubnetKind::Docker, "10.57.0.0/24", Some("10.57.0.0/26")),
+            (SubnetKind::Docker, "10.57.0.0/22", Some("10.57.0.0/24")),
+            (SubnetKind::Docker, "10.57.0.16/28", Some("10.57.0.16/30")),
+            (SubnetKind::Docker, "10.57.0.240/28", Some("10.57.0.240/30")),
+        ] {
+            let s = subnet(kind, cidr, range);
+            assert_eq!(
+                allocatable_count(kind, s.cidr, s.docker_range),
+                walk(&s),
+                "{kind} {cidr}"
+            );
+        }
+        assert_eq!(usable_count("10.0.0.0/8".parse().unwrap()), 65_536 * 254);
     }
 
     #[test]

@@ -74,6 +74,18 @@ Hostnames are unique across every subnet. An ip with hosts can only be deallocat
 `--recursive` (which removes them too), and the same goes for anything containing it. DNS reads a host table (`dns::SharedHosts`) that
 the store swaps after every change, so queries never wait on the store's lock.
 
+`supernet status [--supernet …] [--block-size <prefix>]` is a pretty-only overview, rendered in
+the CLI (`obeliskd-cli/src/status.rs`) from `GET /ips`: each supernet's size and usable count,
+its subnets (size, usable, allocated, share of the supernet), and a grid of its blocks (default: the
+supernet's prefix + 8, so 256 cells; at most 1024). A cell is green if free, red if wholly one
+subnet (a shade per subnet, different from the subnets it touches), or magenta if mixed (shaded
+apart from neighbouring mixed cells). Subnets that fill at least one whole block get their name
+drawn in their cells (black or white, by background), centred on the middle row they cover, with
+room for two characters a cell, up to a row. Names that don't fit get a numbered alias instead,
+numbered smallest subnet first so the small ones get the short numbers, and shown in the ALIAS
+column. An alias that still doesn't fit isn't drawn. "Usable" counts come from `model::ip::allocatable_count`, so
+they match what `ip alloc` hands out. Off a terminal, or with `NO_COLOR`, cells are characters.
+
 `ip resolve --supernet … --subnet … --ip …` is for scripts (`GET /ips/{supernet}/{subnet}/{ip}`,
 open to anyone). It has its own `--format simple|json` (default `simple`: just the address) and
 exit codes: **0** found, **1** not found (the supernet, subnet or ip; `simple` prints nothing, `json`
