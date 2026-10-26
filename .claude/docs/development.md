@@ -57,7 +57,7 @@ from the shared templates in `krrss/util/pipeline-utils` (`.runner`, `".mr=…,t
 | `gitlab-release`  |        | auto | archives → the generic package registry, and the GitLab release |
 | `github-release`  |        | auto | pushes the tag to the GitHub mirror and creates its release (archives + `install.sh`) |
 | `install-smoke`   |        | auto | `install.sh` from that release (binary only) installs that exact version |
-| `publish-crates`  |        | auto | `cargo publish --workspace`, last: crates.io can't be undone    |
+| `publish-crates`  |        | auto | `scripts/publish-crates.sh`, last: crates.io can't be undone. One crate at a time, skipping versions already published and waiting (up to 15 min) for each to reach the index, so a failed run can just be retried |
 
 ## Releasing
 

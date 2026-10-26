@@ -16,7 +16,7 @@
 #   publish  gitlab-release        archives → generic package registry, and the GitLab release
 #            github-release        the tag + archives + install.sh → the public GitHub mirror's release
 #            install-smoke         install.sh from that release (binary only: CI has no systemd) installs that version
-#            publish-crates        `cargo publish --workspace` → crates.io
+#            publish-crates        scripts/publish-crates.sh → crates.io (resumable: retry it after a hiccup)
 #
 # Everything in `publish` waits for every check and build, so a failing build never leaves a
 # half-published version behind. crates.io versions can't be replaced, so publish-crates also waits
@@ -223,7 +223,7 @@ publish-crates:
     - ".mr=never,tag=auto"
   stage: publish
   needs: [check, check-target, build, gitlab-release, github-release, install-smoke]
+  # One crate at a time, skipping versions already published and waiting for each to reach the
+  # index: safe to retry when crates.io lags (as it did for v0.1.0).
   script:
-    - '[ -n "${CARGO_REGISTRY_TOKEN:-}" ] || { echo "CARGO_REGISTRY_TOKEN is not set"; exit 1; }'
-    # set-version just rewrote Cargo.toml/Cargo.lock, hence --allow-dirty.
-    - cargo publish --workspace --locked --allow-dirty
+    - scripts/publish-crates.sh "$CI_COMMIT_TAG"
