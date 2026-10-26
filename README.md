@@ -8,7 +8,7 @@ that suffix to it.
 ## Goals
 
 - Answer exact-match rules locally (A / AAAA), with the DNS wire format understood from the ground up.
-- Edit rules live through a local control socket, with a permission split between normal users and root.
+- Edit rules live through a local control socket; root grants users and groups roles on parts of the tree.
 - Run on Linux, macOS, and Windows, with platform-specific setup selected at compile time.
 - Optionally, help mint certs so overridden names can serve HTTPS.
 

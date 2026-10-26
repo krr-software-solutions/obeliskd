@@ -71,6 +71,38 @@ impl PlatformImpl for Linux {
         command::run_ok(IP, &supernet_route_args("del", cidr), &[NO_SUCH_ROUTE])
     }
 
+    fn user_id(name: &str) -> Option<u32> {
+        unix::user_id(name)
+    }
+
+    fn user_name(uid: u32) -> Option<String> {
+        unix::user_name(uid)
+    }
+
+    fn group_id(name: &str) -> Option<u32> {
+        unix::group_id(name)
+    }
+
+    fn group_name(gid: u32) -> Option<String> {
+        unix::group_name(gid)
+    }
+
+    fn groups_of(uid: u32) -> Vec<u32> {
+        let Some(user) = unix::account(uid) else {
+            return Vec::new();
+        };
+        let Ok(name) = std::ffi::CString::new(user.name) else {
+            return Vec::new();
+        };
+        match nix::unistd::getgrouplist(&name, user.gid) {
+            Ok(gids) => gids.into_iter().map(nix::unistd::Gid::as_raw).collect(),
+            Err(error) => {
+                tracing::warn!(uid, %error, "couldn't look up the user's groups");
+                vec![user.gid.as_raw()]
+            }
+        }
+    }
+
     fn control_socket_path() -> PathBuf {
         PathBuf::from("/run/obeliskd/obeliskd.sock")
     }

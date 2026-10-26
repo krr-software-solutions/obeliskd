@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::Peer;
 use std::net::Ipv4Addr;
 
-use crate::model::{Hostname, Ip, Name, Subnet, SubnetKind, Supernet};
+use crate::model::{Hostname, Ip, Name, Role, Scope, Subnet, SubnetKind, Supernet};
 
 /// `GET /health`
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,4 +234,145 @@ impl IpNode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub error: String,
+}
+
+// ----- grants -----
+
+/// Who a grant is for, as the CLI names them (by name or number). Exactly one of `user`, `group`
+/// and `everyone` is set.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WhoArg {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub everyone: bool,
+}
+
+/// `POST /grants`: give `role` on the scope (the whole tree, a supernet, or a subnet), replacing
+/// whatever role they had there.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantAdd {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supernet: Option<Name>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet: Option<Name>,
+    #[serde(flatten)]
+    pub who: WhoArg,
+    pub role: Role,
+}
+
+/// `GET /grants?supernet=…&subnet=…&user=…|group=…|everyone=true`: the grants on the scope and
+/// everything inside it, optionally only one principal's. `DELETE /grants?…`: removes that
+/// principal's grant on exactly that scope (then the principal is required).
+///
+/// The principal is spelled out field by field (not flattened): query strings can't carry a
+/// flattened `bool`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supernet: Option<Name>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet: Option<Name>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub everyone: bool,
+}
+
+impl GrantQuery {
+    #[must_use]
+    pub fn who(&self) -> WhoArg {
+        WhoArg {
+            user: self.user.clone(),
+            group: self.group.clone(),
+            everyone: self.everyone,
+        }
+    }
+}
+
+/// `GET /grants/check?user=…&supernet=…&subnet=…`: what a user (the caller, by default) may do,
+/// counting their groups, `everyone` and parent scopes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantCheckQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supernet: Option<Name>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet: Option<Name>,
+}
+
+/// A principal, by id and (when the OS knows it) name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Who {
+    User {
+        id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    Group {
+        id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    Everyone,
+}
+
+impl std::fmt::Display for Who {
+    /// `user kalin`, `group 984` (no name known), `everyone`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Who::User { id, name } => write!(f, "user {}", name.clone().unwrap_or(id.to_string())),
+            Who::Group { id, name } => {
+                write!(f, "group {}", name.clone().unwrap_or(id.to_string()))
+            }
+            Who::Everyone => f.write_str("everyone"),
+        }
+    }
+}
+
+/// A grant, with its scope (no supernet: the whole tree).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supernet: Option<Name>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet: Option<Name>,
+    pub who: Who,
+    pub role: Role,
+}
+
+impl GrantNode {
+    /// # Panics
+    ///
+    /// For a subnet without its supernet, which the daemon never sends.
+    #[must_use]
+    pub fn scope(&self) -> Scope {
+        Scope::of(self.supernet.clone(), self.subnet.clone()).expect("a subnet has its supernet")
+    }
+}
+
+/// `GET /grants/check`
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantCheck {
+    pub user: Who,
+    /// Root may do everything, everywhere, with or without grants.
+    pub root: bool,
+    pub scopes: Vec<EffectiveNode>,
+}
+
+/// What the user may do on a scope, and the grants (on it or a parent) that say so.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supernet: Option<Name>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet: Option<Name>,
+    pub role: Role,
+    pub from: Vec<GrantNode>,
 }

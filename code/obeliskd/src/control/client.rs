@@ -6,8 +6,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::api::{
-    ErrorBody, Health, HostAlloc, IpAlloc, IpDealloc, IpDeallocTagged, IpQuery, SubnetAlloc,
-    SubnetDealloc, SubnetQuery, SupernetAlloc, SupernetDealloc, SupernetNode,
+    ErrorBody, GrantAdd, GrantCheck, GrantCheckQuery, GrantNode, GrantQuery, Health, HostAlloc,
+    IpAlloc, IpDealloc, IpDeallocTagged, IpQuery, SubnetAlloc, SubnetDealloc, SubnetQuery,
+    SupernetAlloc, SupernetDealloc, SupernetNode,
 };
 use crate::model::{Hostname, Name};
 use crate::{ObeliskdError, Platform, PlatformImpl};
@@ -151,6 +152,44 @@ impl ControlClient {
         request: &IpDeallocTagged,
     ) -> Result<Vec<SupernetNode>, ObeliskdError> {
         self.send(self.http.delete(url("/ips")).query(request))
+            .await
+    }
+
+    /// `GET /grants`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or answers with an error (an unknown scope, user or group).
+    pub async fn grants(&self, query: &GrantQuery) -> Result<Vec<GrantNode>, ObeliskdError> {
+        self.send(self.http.get(url("/grants")).query(query)).await
+    }
+
+    /// `POST /grants`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or refuses (not an admin of the scope, unknown user, …).
+    pub async fn add_grant(&self, request: &GrantAdd) -> Result<GrantNode, ObeliskdError> {
+        self.post("/grants", request).await
+    }
+
+    /// `DELETE /grants`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or refuses (no such grant, not an admin of the scope, …).
+    pub async fn remove_grant(&self, query: &GrantQuery) -> Result<GrantNode, ObeliskdError> {
+        self.send(self.http.delete(url("/grants")).query(query))
+            .await
+    }
+
+    /// `GET /grants/check`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or answers with an error (an unknown scope or user).
+    pub async fn check_grants(&self, query: &GrantCheckQuery) -> Result<GrantCheck, ObeliskdError> {
+        self.send(self.http.get(url("/grants/check")).query(query))
             .await
     }
 

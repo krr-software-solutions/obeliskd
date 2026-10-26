@@ -134,6 +134,31 @@ pub async fn shutdown_signal() {
     }
 }
 
+pub fn user_id(name: &str) -> Option<u32> {
+    let user = nix::unistd::User::from_name(name).ok()??;
+    Some(user.uid.as_raw())
+}
+
+pub fn user_name(uid: u32) -> Option<String> {
+    let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
+    Some(user.name)
+}
+
+pub fn group_id(name: &str) -> Option<u32> {
+    let group = nix::unistd::Group::from_name(name).ok()??;
+    Some(group.gid.as_raw())
+}
+
+pub fn group_name(gid: u32) -> Option<String> {
+    let group = nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(gid)).ok()??;
+    Some(group.name)
+}
+
+/// A user's account: its name and primary group.
+pub fn account(uid: u32) -> Option<nix::unistd::User> {
+    nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()?
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::MetadataExt;
@@ -165,6 +190,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
+            users: std::sync::Arc::new(crate::users::SystemUsers),
         };
         let server = tokio::spawn(serve(listener, state, async {
             let _ = stopped.await;

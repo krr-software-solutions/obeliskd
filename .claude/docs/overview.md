@@ -97,11 +97,13 @@ don't add flags or files that expect a person to edit config.
   Only changed files are written, each atomically (temp file, fsync, rename). State that won't
   parse or doesn't add up stops the daemon from starting rather than being overwritten. "Doesn't
   add up" means a name that doesn't match its filename, or a `<supernet>/` dir without its
-  `<supernet>.toml`. `config.toml` is for daemon settings only (none yet). Allocations that older
-  versions kept there are moved into `alloc/` automatically.
-- **Control socket:** one socket. The daemon checks the caller's kernel-verified uid
-  (`peer_cred()`) before reading anything. Access starts root-only (so `sudo` works) and is widened
-  through the CLI.
+  `<supernet>.toml`. `config.toml` is for daemon settings only: so far, the grants on the whole
+  tree. Allocations that older versions kept there are moved into `alloc/` automatically.
+- **Control socket:** one socket, open to anyone; reads need nothing. For changes, the daemon takes
+  the caller's kernel-verified uid (`peer_cred()`), looks up all of that user's groups, and checks
+  the **grants** (`obeliskd grant …`): a role (`use` < `manage` < `admin`) for a user, a group or
+  everyone, on the whole tree, a supernet or a subnet, covering everything inside it. Root may do
+  anything; supernets themselves are root-only.
 
 ## DNS address
 

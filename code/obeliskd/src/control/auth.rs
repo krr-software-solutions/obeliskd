@@ -1,25 +1,21 @@
-//! Who may call what. Reads are open to anyone who can connect (no extractor). Handlers that change
-//! things take [`Admin`] (root or the daemon's own uid), or [`Caller`] (any allowed user, once
-//! access can be granted); the extractor rejects with 403 before the handler runs.
+//! Who is calling. Reads are open to anyone who can connect (no extractor). Handlers that change
+//! things take an [`Actor`] (the caller's uid and every group they're in) and hand it to the store,
+//! which checks it against the grants (see [`crate::model::grant`]) under the same lock as the
+//! change itself.
 
 use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::request::Parts;
 
 use super::Peer;
-use super::server::{ApiError, ConnInfo};
-use crate::{Platform, PlatformImpl};
+use super::server::{ApiError, AppState, ConnInfo};
+use crate::model::Actor;
 
-/// Root only, for now; granting access to other users comes later.
-fn is_allowed(peer: Peer) -> bool {
-    is_admin(peer)
-}
-
-/// Root, or the daemon's own user (so a daemon run as yourself in development is yours to manage).
-fn is_admin(peer: Peer) -> bool {
-    peer.uid == 0 || peer.uid == Platform::current_uid()
-}
-
-async fn peer_of<S: Send + Sync>(parts: &mut Parts, state: &S) -> Result<Peer, ApiError> {
+/// The caller's kernel-reported credentials.
+///
+/// # Errors
+///
+/// A 500 if the connection has none (the OS wouldn't say).
+pub async fn peer_of<S: Send + Sync>(parts: &mut Parts, state: &S) -> Result<Peer, ApiError> {
     let ConnectInfo(conn) = ConnectInfo::<ConnInfo>::from_request_parts(parts, state)
         .await
         .map_err(|_| ApiError::internal("no connection info"))?;
@@ -27,42 +23,22 @@ async fn peer_of<S: Send + Sync>(parts: &mut Parts, state: &S) -> Result<Peer, A
         .ok_or_else(|| ApiError::internal("the caller's credentials are unavailable"))
 }
 
-/// The request comes from a user allowed to use the control socket.
-#[derive(Clone, Copy, Debug)]
-pub struct Caller(pub Peer);
-
-impl<S: Send + Sync> FromRequestParts<S> for Caller {
+/// The kernel only reports the connection's primary group, so the rest are looked up by uid.
+impl FromRequestParts<AppState> for Actor {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         let peer = peer_of(parts, state).await?;
-        if is_allowed(peer) {
-            Ok(Caller(peer))
-        } else {
-            Err(ApiError::forbidden(format!(
-                "uid {} may not use the control socket",
-                peer.uid
-            )))
+        let mut gids = state.users.groups_of(peer.uid);
+        if !gids.contains(&peer.gid) {
+            gids.push(peer.gid);
         }
-    }
-}
-
-/// The request comes from root (e.g. via `sudo`).
-#[derive(Clone, Copy, Debug)]
-pub struct Admin(pub Peer);
-
-impl<S: Send + Sync> FromRequestParts<S> for Admin {
-    type Rejection = ApiError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let peer = peer_of(parts, state).await?;
-        if is_admin(peer) {
-            Ok(Admin(peer))
-        } else {
-            Err(ApiError::forbidden(format!(
-                "uid {} isn't root; try again with sudo",
-                peer.uid
-            )))
-        }
+        Ok(Actor {
+            uid: peer.uid,
+            gids,
+        })
     }
 }

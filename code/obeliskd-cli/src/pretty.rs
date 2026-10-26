@@ -7,8 +7,8 @@
 use std::fmt::Write;
 
 use ipnet::Ipv4Net;
-use obeliskd::control::api::{Health, IpNode, SubnetNode, SupernetNode};
-use obeliskd::model::{Name, SubnetKind};
+use obeliskd::control::api::{GrantCheck, GrantNode, Health, IpNode, SubnetNode, SupernetNode};
+use obeliskd::model::{Name, Scope, SubnetKind};
 
 pub fn health(health: &Health) -> String {
     let caller = &health.caller;
@@ -253,6 +253,58 @@ pub fn ips_deallocated(tag: &Name, supernets: &[SupernetNode]) -> String {
     )
 }
 
+pub fn grants(grants: &[GrantNode]) -> String {
+    let rows: Vec<[String; 3]> = grants
+        .iter()
+        .map(|g| [g.scope().to_string(), g.who.to_string(), g.role.to_string()])
+        .collect();
+    table(&["SCOPE", "WHO", "ROLE"], &rows, &[1])
+}
+
+pub fn grant_added(grant: &GrantNode) -> String {
+    format!(
+        "granted {} on {} to {}\n",
+        grant.role,
+        grant.scope().describe(),
+        grant.who
+    )
+}
+
+pub fn grant_removed(grant: &GrantNode) -> String {
+    format!(
+        "removed {}'s {} on {}\n",
+        grant.who,
+        grant.role,
+        grant.scope().describe()
+    )
+}
+
+pub fn grant_check(check: &GrantCheck) -> String {
+    if check.root {
+        return format!("{} is root: every role, everywhere\n", check.user);
+    }
+    let rows: Vec<[String; 3]> = check
+        .scopes
+        .iter()
+        .map(|e| {
+            let scope =
+                Scope::of(e.supernet.clone(), e.subnet.clone()).expect("a subnet has its supernet");
+            let from = e
+                .from
+                .iter()
+                .map(|g| format!("{} on {}", g.who, g.scope()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            [scope.to_string(), e.role.to_string(), from]
+        })
+        .collect();
+    format!(
+        "{}\n{}",
+        check.user,
+        table(&["SCOPE", "ROLE", "FROM"], &rows, &[])
+    )
+}
+
 /// "  and its host …" for each host that went along with `ip`.
 fn write_hosts(out: &mut String, ip: &IpNode) {
     for host in ip.hosts.as_deref().unwrap_or_default() {
@@ -478,6 +530,70 @@ mod tests {
         assert_eq!(
             ips_deallocated(&name("pr-42"), &removed),
             "deallocated 2 ips tagged pr-42\n  ip ex1/1/db-2 (10.57.0.2)\n    and its host a.obd.internal\n  ip ex1/1/db-4 (10.57.0.3)\n"
+        );
+    }
+
+    #[test]
+    fn grants_show_scope_who_and_role() {
+        use obeliskd::control::api::{EffectiveNode, Who};
+        use obeliskd::model::Role;
+        let devs = GrantNode {
+            supernet: Some(name("obd")),
+            subnet: None,
+            who: Who::Group {
+                id: 984,
+                name: Some("devs".to_string()),
+            },
+            role: Role::Manage,
+        };
+        let anyone = GrantNode {
+            supernet: None,
+            subnet: None,
+            who: Who::Everyone,
+            role: Role::Use,
+        };
+        let gone = GrantNode {
+            supernet: Some(name("obd")),
+            subnet: Some(name("dev")),
+            who: Who::User {
+                id: 4242,
+                name: None,
+            },
+            role: Role::Admin,
+        };
+        assert_eq!(
+            grants(&[anyone.clone(), devs.clone(), gone.clone()]),
+            "\
+SCOPE    WHO         ROLE
+*        everyone    use
+obd      group devs  manage
+obd/dev  user 4242   admin
+"
+        );
+        assert_eq!(
+            grant_added(&devs),
+            "granted manage on supernet obd to group devs\n"
+        );
+        assert_eq!(
+            grant_removed(&gone),
+            "removed user 4242's admin on subnet obd/dev\n"
+        );
+        let check = GrantCheck {
+            user: Who::User {
+                id: 1000,
+                name: Some("kalin".to_string()),
+            },
+            root: false,
+            scopes: vec![EffectiveNode {
+                supernet: Some(name("obd")),
+                subnet: None,
+                role: Role::Manage,
+                from: vec![anyone, devs],
+            }],
+        };
+        assert_eq!(
+            grant_check(&check),
+            "user kalin\nSCOPE  ROLE    FROM\nobd    manage  everyone on *, group devs on obd\n"
         );
     }
 

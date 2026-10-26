@@ -9,6 +9,7 @@ use tokio::net::{UnixListener, UnixStream};
 use super::{PlatformImpl, unix};
 use crate::ObeliskdError;
 use crate::control::Peer;
+use crate::os::command;
 
 pub struct MacOs;
 
@@ -95,6 +96,47 @@ impl PlatformImpl for MacOs {
 
     fn remove_supernet_route(_cidr: Ipv4Net) -> Result<(), ObeliskdError> {
         Ok(())
+    }
+
+    fn user_id(name: &str) -> Option<u32> {
+        unix::user_id(name)
+    }
+
+    fn user_name(uid: u32) -> Option<String> {
+        unix::user_name(uid)
+    }
+
+    fn group_id(name: &str) -> Option<u32> {
+        unix::group_id(name)
+    }
+
+    fn group_name(gid: u32) -> Option<String> {
+        unix::group_name(gid)
+    }
+
+    // nix has no getgrouplist here; `id -G` asks Directory Services (nested groups included).
+    fn groups_of(uid: u32) -> Vec<u32> {
+        let Some(user) = unix::account(uid) else {
+            return Vec::new();
+        };
+        let primary = user.gid.as_raw();
+        let args = vec!["-G".to_string(), user.name];
+        match command::run("id", &args) {
+            Ok(output) if output.success => output
+                .stdout
+                .split_whitespace()
+                .filter_map(|gid| gid.parse().ok())
+                .chain(std::iter::once(primary))
+                .collect(),
+            Ok(output) => {
+                tracing::warn!(uid, error = %command::failed("id", &args, &output), "couldn't look up the user's groups");
+                vec![primary]
+            }
+            Err(error) => {
+                tracing::warn!(uid, %error, "couldn't look up the user's groups");
+                vec![primary]
+            }
+        }
     }
 
     fn control_socket_path() -> PathBuf {

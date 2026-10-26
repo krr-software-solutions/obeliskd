@@ -5,11 +5,11 @@ use std::process::ExitCode;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
 use obeliskd::control::api::{
-    HostAlloc, IpAlloc, IpDealloc, IpDeallocTagged, IpQuery, SubnetAlloc, SubnetDealloc,
-    SubnetQuery, SupernetAlloc, SupernetDealloc,
+    GrantAdd, GrantCheckQuery, GrantQuery, HostAlloc, IpAlloc, IpDealloc, IpDeallocTagged, IpQuery,
+    SubnetAlloc, SubnetDealloc, SubnetQuery, SupernetAlloc, SupernetDealloc, WhoArg,
 };
 use obeliskd::control::client::ControlClient;
-use obeliskd::model::{Hostname, Name, SubnetKind};
+use obeliskd::model::{Hostname, Name, Role, SubnetKind};
 use obeliskd::{ObeliskdError, Platform, PlatformImpl};
 use serde::Serialize;
 
@@ -61,6 +61,11 @@ enum Command {
     Host {
         #[command(subcommand)]
         command: HostCommand,
+    },
+    /// Grants: who may change what (a role on the whole tree, a supernet, or a subnet)
+    Grant {
+        #[command(subcommand)]
+        command: GrantCommand,
     },
     /// Print a shell completion script
     Completions { shell: clap_complete::Shell },
@@ -137,7 +142,7 @@ enum SubnetCommand {
         #[command(flatten)]
         output: Output,
     },
-    /// Carve the first free range of a size out of a supernet (root only)
+    /// Carve the first free range of a size out of a supernet (needs manage on the supernet)
     Alloc {
         /// The supernet to carve it from
         #[arg(long)]
@@ -158,7 +163,7 @@ enum SubnetCommand {
         #[command(flatten)]
         output: Output,
     },
-    /// Remove a subnet from its supernet (root only)
+    /// Remove a subnet from its supernet (needs manage on the supernet)
     Dealloc {
         /// The supernet it's in
         #[arg(long)]
@@ -181,7 +186,7 @@ enum HostCommand {
         #[command(flatten)]
         output: Output,
     },
-    /// Point a hostname at an ip (root only)
+    /// Point a hostname at an ip (needs use on its subnet)
     Alloc {
         /// The full hostname, e.g. `app.obd.internal`
         #[arg(long)]
@@ -198,7 +203,7 @@ enum HostCommand {
         #[command(flatten)]
         output: Output,
     },
-    /// Remove a hostname (root only)
+    /// Remove a hostname (needs use on its subnet)
     Dealloc {
         /// The full hostname, e.g. `app.obd.internal`
         #[arg(long)]
@@ -224,7 +229,7 @@ enum IpCommand {
         #[command(flatten)]
         output: Output,
     },
-    /// Give a name the lowest free address in a subnet (root only)
+    /// Give a name the lowest free address in a subnet (needs use on the subnet)
     Alloc {
         /// The supernet the subnet is in
         #[arg(long)]
@@ -241,7 +246,8 @@ enum IpCommand {
         #[command(flatten)]
         output: Output,
     },
-    /// Free an ip, or every ip with a tag; their addresses can be handed out again (root only)
+    /// Free an ip, or every ip with a tag; their addresses can be handed out again (needs use on
+    /// each subnet)
     #[command(group = clap::ArgGroup::new("which").args(["ip", "tag"]).required(true))]
     Dealloc {
         /// The supernet the subnet is in (with --tag: only ips in this supernet)
@@ -262,6 +268,112 @@ enum IpCommand {
         #[command(flatten)]
         output: Output,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum GrantCommand {
+    /// List the grants on a scope and everything inside it (all of them, by default)
+    List {
+        #[command(flatten)]
+        scope: ScopeArgs,
+        #[command(flatten)]
+        who: WhoFilter,
+        #[command(flatten)]
+        output: Output,
+    },
+    /// Give someone a role on a scope, replacing the role they had there (needs admin on it)
+    Add {
+        /// What they may do there (and everywhere inside it)
+        #[arg(long, value_enum)]
+        role: RoleArg,
+        #[command(flatten)]
+        who: WhoRequired,
+        #[command(flatten)]
+        scope: ScopeArgs,
+        #[command(flatten)]
+        output: Output,
+    },
+    /// Remove someone's grant on exactly this scope (needs admin on it)
+    Remove {
+        #[command(flatten)]
+        who: WhoRequired,
+        #[command(flatten)]
+        scope: ScopeArgs,
+        #[command(flatten)]
+        output: Output,
+    },
+    /// What a user may do, counting their groups, `everyone` and parent scopes (you, by default)
+    Check {
+        /// The user, by name or uid
+        #[arg(long)]
+        user: Option<String>,
+        #[command(flatten)]
+        scope: ScopeArgs,
+        #[command(flatten)]
+        output: Output,
+    },
+}
+
+/// Where a grant applies: the whole tree (neither), a supernet, or a subnet.
+#[derive(Debug, Args)]
+struct ScopeArgs {
+    /// A supernet (without it: the whole tree)
+    #[arg(long)]
+    supernet: Option<Name>,
+    /// A subnet in it (needs --supernet)
+    #[arg(long, requires = "supernet")]
+    subnet: Option<Name>,
+}
+
+/// Who a grant is for: exactly one of these.
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+struct WhoRequired {
+    /// A user, by name or uid
+    #[arg(long)]
+    user: Option<String>,
+    /// A group, by name or gid
+    #[arg(long)]
+    group: Option<String>,
+    /// Anyone who can connect to the daemon
+    #[arg(long)]
+    everyone: bool,
+}
+
+/// Only grants for one of these (as granted: a user's groups aren't included; see `grant check`).
+#[derive(Debug, Args)]
+#[group(multiple = false)]
+struct WhoFilter {
+    /// Only grants to this user (by name or uid)
+    #[arg(long)]
+    user: Option<String>,
+    /// Only grants to this group (by name or gid)
+    #[arg(long)]
+    group: Option<String>,
+    /// Only grants to everyone
+    #[arg(long)]
+    everyone: bool,
+}
+
+/// `--role`
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RoleArg {
+    /// Alloc and dealloc ips and hosts
+    Use,
+    /// …and subnets
+    Manage,
+    /// …and add and remove grants
+    Admin,
+}
+
+impl From<RoleArg> for Role {
+    fn from(role: RoleArg) -> Self {
+        match role {
+            RoleArg::Use => Role::Use,
+            RoleArg::Manage => Role::Manage,
+            RoleArg::Admin => Role::Admin,
+        }
+    }
 }
 
 /// `--kind`: what a subnet's addresses are for.
@@ -658,6 +770,67 @@ async fn run_host(socket: &Path, command: HostCommand) -> Result<(), ObeliskdErr
     }
 }
 
+async fn run_grant(socket: &Path, command: GrantCommand) -> Result<(), ObeliskdError> {
+    let client = ControlClient::new(socket)?;
+    match command {
+        GrantCommand::List { scope, who, output } => {
+            let query = GrantQuery {
+                supernet: scope.supernet,
+                subnet: scope.subnet,
+                user: who.user,
+                group: who.group,
+                everyone: who.everyone,
+            };
+            let grants = client.grants(&query).await?;
+            output.print(&grants, |g| pretty::grants(g));
+        }
+        GrantCommand::Add {
+            role,
+            who,
+            scope,
+            output,
+        } => {
+            let request = GrantAdd {
+                supernet: scope.supernet,
+                subnet: scope.subnet,
+                who: WhoArg {
+                    user: who.user,
+                    group: who.group,
+                    everyone: who.everyone,
+                },
+                role: role.into(),
+            };
+            let grant = client.add_grant(&request).await?;
+            output.print(&grant, pretty::grant_added);
+        }
+        GrantCommand::Remove { who, scope, output } => {
+            let query = GrantQuery {
+                supernet: scope.supernet,
+                subnet: scope.subnet,
+                user: who.user,
+                group: who.group,
+                everyone: who.everyone,
+            };
+            let grant = client.remove_grant(&query).await?;
+            output.print(&grant, pretty::grant_removed);
+        }
+        GrantCommand::Check {
+            user,
+            scope,
+            output,
+        } => {
+            let query = GrantCheckQuery {
+                user,
+                supernet: scope.supernet,
+                subnet: scope.subnet,
+            };
+            let check = client.check_grants(&query).await?;
+            output.print(&check, pretty::grant_check);
+        }
+    }
+    Ok(())
+}
+
 async fn main_impl() -> Result<(), ObeliskdError> {
     let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
     let socket: PathBuf = cli.socket;
@@ -668,6 +841,7 @@ async fn main_impl() -> Result<(), ObeliskdError> {
         Command::Subnet { command } => run_subnet(&socket, command).await,
         Command::Ip { command } => run_ip(&socket, command).await,
         Command::Host { command } => run_host(&socket, command).await,
+        Command::Grant { command } => run_grant(&socket, command).await,
         Command::Completions { shell } => {
             command_completions(shell);
             Ok(())

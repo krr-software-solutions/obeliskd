@@ -37,6 +37,9 @@ pub enum ObeliskdError {
     #[error("{0}")]
     NotFound(String),
 
+    #[error("{0}")]
+    Forbidden(String),
+
     #[error("`{command}` failed: {message}")]
     Os { command: String, message: String },
 

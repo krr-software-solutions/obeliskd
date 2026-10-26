@@ -63,6 +63,7 @@ mod tests {
             cidr: cidr.parse().unwrap(),
             docker_range: docker_range.map(|r| r.parse().unwrap()),
             docker_gateway: None,
+            grants: Vec::new(),
             ips: Vec::new(),
         }
     }

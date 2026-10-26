@@ -15,7 +15,10 @@ use tokio::sync::Mutex;
 use crate::ObeliskdError;
 use crate::dns::{HostTable, SharedHosts};
 use crate::model::subnet::{self, PlaceError};
-use crate::model::{Host, Hostname, Ip, Name, Subnet, SubnetKind, Supernet, ip, supernet};
+use crate::model::{
+    Actor, Grant, Host, Hostname, Ip, Name, Principal, Role, Scope, Subnet, SubnetKind, Supernet,
+    ip, supernet,
+};
 use crate::os::OsEffects;
 
 pub use files::CONFIG_FILE;
@@ -23,6 +26,9 @@ pub use files::CONFIG_FILE;
 /// Everything obeliskd has allocated, as one tree (on disk it's split across files).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
+    /// Grants on the whole tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<Grant>,
     #[serde(default)]
     pub supernets: Vec<Supernet>,
 }
@@ -118,6 +124,117 @@ impl Config {
                 if using.len() == 1 { "it" } else { "them" }
             )))
         }
+    }
+
+    /// `NotFound` unless `scope` exists.
+    fn exists(&self, scope: &Scope) -> Result<(), ObeliskdError> {
+        if self.grants_on(scope).is_some() {
+            return Ok(());
+        }
+        let supernet = scope.supernet().expect("the whole tree always exists");
+        Err(ObeliskdError::NotFound(
+            match (
+                self.supernets.iter().any(|s| &s.name == supernet),
+                scope.subnet(),
+            ) {
+                (true, Some(subnet)) => format!("no subnet {supernet}/{subnet}"),
+                _ => format!("no supernet {supernet}"),
+            },
+        ))
+    }
+
+    /// The grants set on `scope` itself, if it exists.
+    fn grants_on(&self, scope: &Scope) -> Option<&Vec<Grant>> {
+        let supernet = |name: &Name| self.supernets.iter().find(|s| &s.name == name);
+        match scope {
+            Scope::All => Some(&self.grants),
+            Scope::Supernet(name) => supernet(name).map(|s| &s.grants),
+            Scope::Subnet(name, subnet) => supernet(name)?
+                .subnets
+                .iter()
+                .find(|s| &s.name == subnet)
+                .map(|s| &s.grants),
+        }
+    }
+
+    fn grants_on_mut(&mut self, scope: &Scope) -> Option<&mut Vec<Grant>> {
+        let supernets = self.supernets.iter_mut();
+        match scope {
+            Scope::All => Some(&mut self.grants),
+            Scope::Supernet(name) => supernets
+                .into_iter()
+                .find(|s| &s.name == name)
+                .map(|s| &mut s.grants),
+            Scope::Subnet(name, subnet) => supernets
+                .into_iter()
+                .find(|s| &s.name == name)?
+                .subnets
+                .iter_mut()
+                .find(|s| &s.name == subnet)
+                .map(|s| &mut s.grants),
+        }
+    }
+
+    /// Every grant with its scope, in tree order (a scope's own grants before its children's).
+    fn all_grants(&self) -> Vec<(Scope, Grant)> {
+        let mut out: Vec<(Scope, Grant)> = self.grants.iter().map(|g| (Scope::All, *g)).collect();
+        for supernet in &self.supernets {
+            let here = Scope::Supernet(supernet.name.clone());
+            out.extend(supernet.grants.iter().map(|g| (here.clone(), *g)));
+            for subnet in &supernet.subnets {
+                let here = Scope::Subnet(supernet.name.clone(), subnet.name.clone());
+                out.extend(subnet.grants.iter().map(|g| (here.clone(), *g)));
+            }
+        }
+        out
+    }
+
+    /// The grants that give `actor` something on `scope`: on it, or on one of its parents.
+    fn grants_for(&self, actor: &Actor, scope: &Scope) -> Vec<(Scope, Grant)> {
+        self.all_grants()
+            .into_iter()
+            .filter(|(at, grant)| at.covers(scope) && actor.is(grant.who))
+            .collect()
+    }
+
+    /// `actor`'s role on `scope`: root has every role everywhere.
+    fn role(&self, actor: &Actor, scope: &Scope) -> Option<Role> {
+        if actor.is_root() {
+            return Some(Role::Admin);
+        }
+        self.grants_for(actor, scope)
+            .iter()
+            .map(|(_, g)| g.role)
+            .max()
+    }
+
+    /// `NotFound` unless `scope` exists; then `Forbidden` unless `actor` has at least `role` on it.
+    fn require(&self, actor: &Actor, scope: &Scope, role: Role) -> Result<(), ObeliskdError> {
+        self.exists(scope)?;
+        let has = self.role(actor, scope);
+        if has >= Some(role) {
+            Ok(())
+        } else {
+            Err(ObeliskdError::Forbidden(format!(
+                "uid {} needs {role} on {} (has {}); ask an admin of it, or use sudo",
+                actor.uid,
+                scope.describe(),
+                has.map_or_else(|| "nothing".to_string(), |r| r.to_string())
+            )))
+        }
+    }
+}
+
+/// `Forbidden` unless `actor` is root: some changes are never granted (a supernet can overlap the
+/// LAN's or a VPN's routes).
+fn require_root(actor: &Actor, what: &str) -> Result<(), ObeliskdError> {
+    if actor.is_root() {
+        Ok(())
+    } else {
+        Err(ObeliskdError::Forbidden(format!(
+            "uid {} isn't root, and {what} needs root; try again with sudo",
+            actor.uid
+        )))
     }
 }
 
@@ -241,9 +358,11 @@ impl Store {
     /// or a failure to save (then nothing changes).
     pub async fn alloc_supernet(
         &self,
+        actor: &Actor,
         name: Name,
         cidr: Ipv4Net,
     ) -> Result<Supernet, ObeliskdError> {
+        require_root(actor, "creating a supernet")?;
         let cidr = supernet::require_network(cidr).map_err(ObeliskdError::Invalid)?;
         let mut config = self.config.lock().await;
         if config.supernets.iter().any(|s| s.name == name) {
@@ -261,6 +380,7 @@ impl Store {
         let supernet = Supernet {
             name,
             cidr,
+            grants: Vec::new(),
             subnets: Vec::new(),
         };
         let mut next = config.clone();
@@ -313,6 +433,7 @@ impl Store {
     /// save (then nothing changes).
     pub async fn alloc_subnet(
         &self,
+        actor: &Actor,
         supernet: &Name,
         name: Name,
         kind: SubnetKind,
@@ -320,6 +441,7 @@ impl Store {
         reserve: Option<u8>,
     ) -> Result<Subnet, ObeliskdError> {
         let mut config = self.config.lock().await;
+        config.require(actor, &Scope::Supernet(supernet.clone()), Role::Manage)?;
         let mut next = config.clone();
         let parent = next
             .supernets
@@ -364,6 +486,7 @@ impl Store {
             cidr,
             docker_range,
             docker_gateway: docker_range.map(|_| subnet::docker_gateway(cidr)),
+            grants: Vec::new(),
             ips: Vec::new(),
         };
         parent.subnets.push(subnet.clone());
@@ -394,9 +517,11 @@ impl Store {
     /// subnets and `recursive` is off; or a failure to save (then nothing changes).
     pub async fn dealloc_supernet(
         &self,
+        actor: &Actor,
         name: &Name,
         recursive: bool,
     ) -> Result<Supernet, ObeliskdError> {
+        require_root(actor, "removing a supernet")?;
         let mut config = self.config.lock().await;
         let mut next = config.clone();
         let index = next
@@ -444,11 +569,13 @@ impl Store {
     /// (then nothing changes).
     pub async fn dealloc_subnet(
         &self,
+        actor: &Actor,
         supernet: &Name,
         name: &Name,
         recursive: bool,
     ) -> Result<Subnet, ObeliskdError> {
         let mut config = self.config.lock().await;
+        config.require(actor, &Scope::Supernet(supernet.clone()), Role::Manage)?;
         let mut next = config.clone();
         let parent = next
             .supernets
@@ -564,12 +691,14 @@ impl Store {
     /// changes).
     pub async fn alloc_ip(
         &self,
+        actor: &Actor,
         supernet: &Name,
         subnet: &Name,
         name: Name,
         tag: Option<Name>,
     ) -> Result<IpIn, ObeliskdError> {
         let mut config = self.config.lock().await;
+        config.require(actor, &subnet_scope(supernet, subnet), Role::Use)?;
         let mut next = config.clone();
         let parent = find_subnet(&mut next, supernet, subnet)?;
         if parent.ips.iter().any(|ip| ip.name == name) {
@@ -619,12 +748,14 @@ impl Store {
     /// (then nothing changes).
     pub async fn dealloc_ip(
         &self,
+        actor: &Actor,
         supernet: &Name,
         subnet: &Name,
         name: &Name,
         recursive: bool,
     ) -> Result<IpIn, ObeliskdError> {
         let mut config = self.config.lock().await;
+        config.require(actor, &subnet_scope(supernet, subnet), Role::Use)?;
         let mut next = config.clone();
         if !recursive {
             config.refuse_if_hosts(&format!("ip {supernet}/{subnet}/{name}"), |h| {
@@ -669,6 +800,7 @@ impl Store {
     /// failure.
     pub async fn dealloc_ips_tagged(
         &self,
+        actor: &Actor,
         supernet: Option<&Name>,
         subnet: Option<&Name>,
         tag: &Name,
@@ -693,6 +825,26 @@ impl Store {
             };
             return Err(ObeliskdError::NotFound(format!(
                 "no ips tagged {tag}{place}"
+            )));
+        }
+        // Needs use on every subnet it would touch.
+        let denied: Vec<String> = removed
+            .iter()
+            .flat_map(|s| {
+                s.subnets
+                    .iter()
+                    .map(move |sub| subnet_scope(&s.name, &sub.name))
+            })
+            .filter(|scope| config.role(actor, scope) < Some(Role::Use))
+            .map(|scope| scope.to_string())
+            .collect();
+        if !denied.is_empty() {
+            return Err(ObeliskdError::Forbidden(format!(
+                "uid {} needs use on subnet{} {} to dealloc the ips tagged {tag} there; nothing was \
+                 removed (narrow it with --supernet/--subnet, ask an admin, or use sudo)",
+                actor.uid,
+                if denied.len() == 1 { "" } else { "s" },
+                denied.join(", ")
             )));
         }
         let goes = |s: &Name, n: &Name, i: &Name| {
@@ -760,8 +912,13 @@ impl Store {
     ///
     /// [`ObeliskdError::Conflict`] if the hostname is taken (by any ip); [`ObeliskdError::NotFound`]
     /// if the ip doesn't exist; or a failure to save (then nothing changes).
-    pub async fn alloc_host(&self, host: Host) -> Result<HostIn, ObeliskdError> {
+    pub async fn alloc_host(&self, actor: &Actor, host: Host) -> Result<HostIn, ObeliskdError> {
         let mut config = self.config.lock().await;
+        config.require(
+            actor,
+            &subnet_scope(&host.supernet, &host.subnet),
+            Role::Use,
+        )?;
         if let Some((taken, _)) = config.hosts().find(|(h, _)| h.name == host.name) {
             return Err(ObeliskdError::Conflict(format!(
                 "host {} already points at ip {}/{}/{}",
@@ -801,12 +958,21 @@ impl Store {
     /// # Panics
     ///
     /// Never: the host was just found on that ip.
-    pub async fn dealloc_host(&self, name: &Hostname) -> Result<HostIn, ObeliskdError> {
+    pub async fn dealloc_host(
+        &self,
+        actor: &Actor,
+        name: &Hostname,
+    ) -> Result<HostIn, ObeliskdError> {
         let mut config = self.config.lock().await;
         let (host, address) = config
             .hosts()
             .find(|(h, _)| &h.name == name)
             .ok_or_else(|| ObeliskdError::NotFound(format!("no host {name}")))?;
+        config.require(
+            actor,
+            &subnet_scope(&host.supernet, &host.subnet),
+            Role::Use,
+        )?;
         let mut next = config.clone();
         let ip = next
             .ip_mut(&host.supernet, &host.subnet, &host.ip)
@@ -817,6 +983,142 @@ impl Store {
         tracing::info!("deallocated host {}", host.name);
         Ok(HostIn { host, address })
     }
+}
+
+/// What someone may do on a scope, and the grants that say so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Effective {
+    pub scope: Scope,
+    pub role: Role,
+    /// The grants that apply, on the scope or a parent (none for root).
+    pub from: Vec<(Scope, Grant)>,
+}
+
+impl Store {
+    /// The grants set on `scope` and everything inside it, optionally only those for `who`.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::NotFound`] if `scope` doesn't exist.
+    pub async fn grants(
+        &self,
+        scope: &Scope,
+        who: Option<Principal>,
+    ) -> Result<Vec<(Scope, Grant)>, ObeliskdError> {
+        let config = self.config.lock().await;
+        config.exists(scope)?;
+        Ok(config
+            .all_grants()
+            .into_iter()
+            .filter(|(at, grant)| scope.covers(at) && who.is_none_or(|w| grant.who == w))
+            .collect())
+    }
+
+    /// Gives `grant.who` `grant.role` on `scope` (replacing the role they had there), and saves.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::NotFound`] if `scope` doesn't exist; [`ObeliskdError::Forbidden`] unless
+    /// `actor` is an admin of it; or a failure to save (then nothing changes).
+    ///
+    /// # Panics
+    ///
+    /// Never: the scope was just checked.
+    pub async fn grant(
+        &self,
+        actor: &Actor,
+        scope: Scope,
+        grant: Grant,
+    ) -> Result<Grant, ObeliskdError> {
+        let mut config = self.config.lock().await;
+        config.require(actor, &scope, Role::Admin)?;
+        let mut next = config.clone();
+        let grants = next.grants_on_mut(&scope).expect("the scope exists");
+        grants.retain(|g| g.who != grant.who);
+        grants.push(grant);
+        grants.sort_by_key(|g| g.who);
+        files::persist(&self.dir, &config, &next)?;
+        self.commit(&mut config, next);
+        tracing::info!("granted {} on {} to {}", grant.role, scope, grant.who);
+        Ok(grant)
+    }
+
+    /// Takes away whatever role `who` has on `scope` itself (not what they get from a parent), and
+    /// saves.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::NotFound`] if `scope` doesn't exist or `who` has no grant on it;
+    /// [`ObeliskdError::Forbidden`] unless `actor` is an admin of it; or a failure to save.
+    ///
+    /// # Panics
+    ///
+    /// Never: the scope was just checked.
+    pub async fn revoke(
+        &self,
+        actor: &Actor,
+        scope: Scope,
+        who: Principal,
+    ) -> Result<Grant, ObeliskdError> {
+        let mut config = self.config.lock().await;
+        config.require(actor, &scope, Role::Admin)?;
+        let mut next = config.clone();
+        let grants = next.grants_on_mut(&scope).expect("the scope exists");
+        let index = grants.iter().position(|g| g.who == who).ok_or_else(|| {
+            ObeliskdError::NotFound(format!("{who} has no grant on {}", scope.describe()))
+        })?;
+        let removed = grants.remove(index);
+        files::persist(&self.dir, &config, &next)?;
+        self.commit(&mut config, next);
+        tracing::info!("revoked {} on {} from {}", removed.role, scope, removed.who);
+        Ok(removed)
+    }
+
+    /// What `actor` may do: on `scope` (counting its parents), or else at every scope where a grant
+    /// applies to them. Root may do everything everywhere.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::NotFound`] if `scope` doesn't exist.
+    pub async fn effective(
+        &self,
+        actor: &Actor,
+        scope: Option<&Scope>,
+    ) -> Result<Vec<Effective>, ObeliskdError> {
+        let config = self.config.lock().await;
+        if let Some(scope) = scope {
+            config.exists(scope)?;
+        }
+        let at = |scope: &Scope| {
+            let from = if actor.is_root() {
+                Vec::new()
+            } else {
+                config.grants_for(actor, scope)
+            };
+            config.role(actor, scope).map(|role| Effective {
+                scope: scope.clone(),
+                role,
+                from,
+            })
+        };
+        Ok(match scope {
+            Some(scope) => at(scope).into_iter().collect(),
+            None if actor.is_root() => at(&Scope::All).into_iter().collect(),
+            None => {
+                let mut scopes: Vec<Scope> = Vec::new();
+                for (scope, grant) in config.all_grants() {
+                    if actor.is(grant.who) && !scopes.contains(&scope) {
+                        scopes.push(scope);
+                    }
+                }
+                scopes.iter().filter_map(at).collect()
+            }
+        })
+    }
+}
+
+fn subnet_scope(supernet: &Name, subnet: &Name) -> Scope {
+    Scope::Subnet(supernet.clone(), subnet.clone())
 }
 
 fn find_subnet<'a>(
@@ -860,7 +1162,7 @@ mod tests {
         assert_eq!(store.supernets().await, Vec::new());
 
         store
-            .alloc_supernet(name("obd"), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, name("obd"), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
         let reloaded = load(dir.path());
@@ -869,6 +1171,7 @@ mod tests {
             vec![Supernet {
                 name: name("obd"),
                 cidr: "10.57.0.0/16".parse().unwrap(),
+                grants: Vec::new(),
                 subnets: Vec::new(),
             }]
         );
@@ -896,22 +1199,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = load(dir.path());
         store
-            .alloc_supernet(name("obd"), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, name("obd"), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
 
         let taken = store
-            .alloc_supernet(name("obd"), "10.58.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, name("obd"), "10.58.0.0/16".parse().unwrap())
             .await;
         assert!(matches!(taken, Err(ObeliskdError::Conflict(_))));
         let overlap = store
-            .alloc_supernet(name("other"), "10.57.22.0/24".parse().unwrap())
+            .alloc_supernet(
+                &Actor::ROOT,
+                name("other"),
+                "10.57.22.0/24".parse().unwrap(),
+            )
             .await;
         assert!(
             matches!(overlap, Err(ObeliskdError::Conflict(m)) if m.contains("overlaps supernet obd"))
         );
         let unaligned = store
-            .alloc_supernet(name("other"), "10.58.1.2/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, name("other"), "10.58.1.2/16".parse().unwrap())
             .await;
         assert!(matches!(unaligned, Err(ObeliskdError::Invalid(_))));
         assert_eq!(store.supernets().await.len(), 1);
@@ -923,19 +1230,26 @@ mod tests {
         let store = load(dir.path());
         let obd = name("obd");
         store
-            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
 
         let host = store
-            .alloc_subnet(&obd, name("host"), SubnetKind::Host, 24, None)
+            .alloc_subnet(&Actor::ROOT, &obd, name("host"), SubnetKind::Host, 24, None)
             .await
             .unwrap();
         assert_eq!(host.cidr, "10.57.0.0/24".parse().unwrap());
         assert_eq!(host.docker_range, None);
 
         let dev = store
-            .alloc_subnet(&obd, name("k3d-dev"), SubnetKind::Docker, 24, Some(26))
+            .alloc_subnet(
+                &Actor::ROOT,
+                &obd,
+                name("k3d-dev"),
+                SubnetKind::Docker,
+                24,
+                Some(26),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -970,32 +1284,53 @@ mod tests {
         let store = load(dir.path());
         let obd = name("obd");
         store
-            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
         store
-            .alloc_subnet(&obd, name("host"), SubnetKind::Host, 24, None)
+            .alloc_subnet(&Actor::ROOT, &obd, name("host"), SubnetKind::Host, 24, None)
             .await
             .unwrap();
 
         let unknown = store
-            .alloc_subnet(&name("nope"), name("x"), SubnetKind::Host, 24, None)
+            .alloc_subnet(
+                &Actor::ROOT,
+                &name("nope"),
+                name("x"),
+                SubnetKind::Host,
+                24,
+                None,
+            )
             .await;
         assert!(matches!(unknown, Err(ObeliskdError::NotFound(_))));
         let taken = store
-            .alloc_subnet(&obd, name("host"), SubnetKind::Host, 24, None)
+            .alloc_subnet(&Actor::ROOT, &obd, name("host"), SubnetKind::Host, 24, None)
             .await;
         assert!(matches!(taken, Err(ObeliskdError::Conflict(_))));
         let host_reserve = store
-            .alloc_subnet(&obd, name("x"), SubnetKind::Host, 24, Some(26))
+            .alloc_subnet(
+                &Actor::ROOT,
+                &obd,
+                name("x"),
+                SubnetKind::Host,
+                24,
+                Some(26),
+            )
             .await;
         assert!(matches!(host_reserve, Err(ObeliskdError::Invalid(_))));
         let docker_no_reserve = store
-            .alloc_subnet(&obd, name("x"), SubnetKind::Docker, 24, None)
+            .alloc_subnet(&Actor::ROOT, &obd, name("x"), SubnetKind::Docker, 24, None)
             .await;
         assert!(matches!(docker_no_reserve, Err(ObeliskdError::Invalid(_))));
         let tiny_docker = store
-            .alloc_subnet(&obd, name("x"), SubnetKind::Docker, 30, Some(31))
+            .alloc_subnet(
+                &Actor::ROOT,
+                &obd,
+                name("x"),
+                SubnetKind::Docker,
+                30,
+                Some(31),
+            )
             .await;
         assert!(matches!(tiny_docker, Err(ObeliskdError::Invalid(_))));
         assert!(matches!(
@@ -1049,12 +1384,12 @@ mod tests {
         let store = load(dir.path());
         let obd = name("obd");
         store
-            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
         for n in ["a", "b"] {
             store
-                .alloc_subnet(&obd, name(n), SubnetKind::Host, 24, None)
+                .alloc_subnet(&Actor::ROOT, &obd, name(n), SubnetKind::Host, 24, None)
                 .await
                 .unwrap();
         }
@@ -1069,7 +1404,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
 
         store
-            .alloc_ip(&obd, &name("a"), name("db"), None)
+            .alloc_ip(&Actor::ROOT, &obd, &name("a"), name("db"), None)
             .await
             .unwrap();
         assert_eq!(
@@ -1086,7 +1421,10 @@ mod tests {
         assert!(a.contains("[[ips]]") && a.contains("10.57.0.1"), "{a}");
 
         // Removing the supernet takes its files and dir with it.
-        store.dealloc_supernet(&obd, true).await.unwrap();
+        store
+            .dealloc_supernet(&Actor::ROOT, &obd, true)
+            .await
+            .unwrap();
         assert!(!dir.path().join("alloc/obd").exists());
         assert!(!dir.path().join("alloc/obd.toml").exists());
     }
@@ -1099,11 +1437,11 @@ mod tests {
         let store = load(dir.path());
         let obd = name("obd");
         store
-            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
         store
-            .alloc_subnet(&obd, name("a"), SubnetKind::Host, 24, None)
+            .alloc_subnet(&Actor::ROOT, &obd, name("a"), SubnetKind::Host, 24, None)
             .await
             .unwrap();
         let mode = |p: &str| {
@@ -1179,31 +1517,40 @@ mod tests {
         let store = load(dir.path());
         let obd = name("obd");
         store
-            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
         let first = store
-            .alloc_subnet(&obd, name("a"), SubnetKind::Host, 24, None)
+            .alloc_subnet(&Actor::ROOT, &obd, name("a"), SubnetKind::Host, 24, None)
             .await
             .unwrap();
 
         // Not empty: refused, and nothing changes.
-        let busy = store.dealloc_supernet(&obd, false).await;
+        let busy = store.dealloc_supernet(&Actor::ROOT, &obd, false).await;
         assert!(
             matches!(busy, Err(ObeliskdError::Conflict(m)) if m.contains("still has 1 subnet;"))
         );
 
-        let removed = store.dealloc_subnet(&obd, &name("a"), false).await.unwrap();
+        let removed = store
+            .dealloc_subnet(&Actor::ROOT, &obd, &name("a"), false)
+            .await
+            .unwrap();
         assert_eq!(removed, first);
         // The range is free again: the next /24 lands in the same place.
         let again = store
-            .alloc_subnet(&obd, name("b"), SubnetKind::Host, 24, None)
+            .alloc_subnet(&Actor::ROOT, &obd, name("b"), SubnetKind::Host, 24, None)
             .await
             .unwrap();
         assert_eq!(again.cidr, first.cidr);
-        store.dealloc_subnet(&obd, &name("b"), false).await.unwrap();
+        store
+            .dealloc_subnet(&Actor::ROOT, &obd, &name("b"), false)
+            .await
+            .unwrap();
 
-        store.dealloc_supernet(&obd, false).await.unwrap();
+        store
+            .dealloc_supernet(&Actor::ROOT, &obd, false)
+            .await
+            .unwrap();
         let reloaded = load(dir.path());
         assert_eq!(reloaded.supernets().await, Vec::new(), "persisted");
     }
@@ -1214,16 +1561,19 @@ mod tests {
         let store = load(dir.path());
         let obd = name("obd");
         store
-            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
         for n in ["a", "b"] {
             store
-                .alloc_subnet(&obd, name(n), SubnetKind::Host, 24, None)
+                .alloc_subnet(&Actor::ROOT, &obd, name(n), SubnetKind::Host, 24, None)
                 .await
                 .unwrap();
         }
-        let removed = store.dealloc_supernet(&obd, true).await.unwrap();
+        let removed = store
+            .dealloc_supernet(&Actor::ROOT, &obd, true)
+            .await
+            .unwrap();
         assert_eq!(removed.subnets.len(), 2);
         assert_eq!(store.subnets(None).await.unwrap(), Vec::new());
         assert_eq!(load(dir.path()).supernets().await, Vec::new());
@@ -1234,19 +1584,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = load(dir.path());
         assert!(matches!(
-            store.dealloc_supernet(&name("nope"), false).await,
+            store
+                .dealloc_supernet(&Actor::ROOT, &name("nope"), false)
+                .await,
             Err(ObeliskdError::NotFound(_))
         ));
         store
-            .alloc_supernet(name("obd"), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, name("obd"), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
         assert!(matches!(
-            store.dealloc_subnet(&name("nope"), &name("a"), false).await,
+            store
+                .dealloc_subnet(&Actor::ROOT, &name("nope"), &name("a"), false)
+                .await,
             Err(ObeliskdError::NotFound(_))
         ));
         assert!(matches!(
-            store.dealloc_subnet(&name("obd"), &name("a"), false).await,
+            store
+                .dealloc_subnet(&Actor::ROOT, &name("obd"), &name("a"), false)
+                .await,
             Err(ObeliskdError::NotFound(_))
         ));
     }
@@ -1257,11 +1613,11 @@ mod tests {
         let (store, os) = load_with(dir.path());
         let obd = name("obd");
         store
-            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
         store
-            .alloc_subnet(&obd, name("a"), SubnetKind::Host, 24, None)
+            .alloc_subnet(&Actor::ROOT, &obd, name("a"), SubnetKind::Host, 24, None)
             .await
             .unwrap();
 
@@ -1271,12 +1627,22 @@ mod tests {
             message: "boom".to_string(),
         });
         let refused = store
-            .alloc_subnet(&obd, name("b"), SubnetKind::Docker, 24, Some(26))
+            .alloc_subnet(
+                &Actor::ROOT,
+                &obd,
+                name("b"),
+                SubnetKind::Docker,
+                24,
+                Some(26),
+            )
             .await;
         assert!(matches!(refused, Err(ObeliskdError::Os { .. })));
         assert_eq!(load(dir.path()).subnets(None).await.unwrap().len(), 1);
 
-        store.dealloc_supernet(&obd, true).await.unwrap();
+        store
+            .dealloc_supernet(&Actor::ROOT, &obd, true)
+            .await
+            .unwrap();
         assert_eq!(
             os.calls(),
             [
@@ -1295,11 +1661,11 @@ mod tests {
             let store = load(dir.path());
             let obd = name("obd");
             store
-                .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+                .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
                 .await
                 .unwrap();
             store
-                .alloc_subnet(&obd, name("a"), SubnetKind::Host, 24, None)
+                .alloc_subnet(&Actor::ROOT, &obd, name("a"), SubnetKind::Host, 24, None)
                 .await
                 .unwrap();
         }
@@ -1330,31 +1696,41 @@ mod tests {
         let (store, os) = load_with(dir.path());
         let obd = name("obd");
         store
-            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
         store
-            .alloc_subnet(&obd, name("host"), SubnetKind::Host, 24, None)
+            .alloc_subnet(&Actor::ROOT, &obd, name("host"), SubnetKind::Host, 24, None)
             .await
             .unwrap();
         store
-            .alloc_subnet(&obd, name("dev"), SubnetKind::Docker, 24, Some(26))
+            .alloc_subnet(
+                &Actor::ROOT,
+                &obd,
+                name("dev"),
+                SubnetKind::Docker,
+                24,
+                Some(26),
+            )
             .await
             .unwrap();
         let (host, dev) = (name("host"), name("dev"));
 
-        let db = store.alloc_ip(&obd, &host, name("db"), None).await.unwrap();
+        let db = store
+            .alloc_ip(&Actor::ROOT, &obd, &host, name("db"), None)
+            .await
+            .unwrap();
         assert_eq!(
             db.ip.address,
             "10.57.0.1".parse::<std::net::Ipv4Addr>().unwrap()
         );
         let web = store
-            .alloc_ip(&obd, &host, name("web"), None)
+            .alloc_ip(&Actor::ROOT, &obd, &host, name("web"), None)
             .await
             .unwrap();
         assert_eq!(web.ip.address.to_string(), "10.57.0.2");
         let ingress = store
-            .alloc_ip(&obd, &dev, name("ingress"), None)
+            .alloc_ip(&Actor::ROOT, &obd, &dev, name("ingress"), None)
             .await
             .unwrap();
         assert_eq!(
@@ -1363,16 +1739,18 @@ mod tests {
             "after Docker's slice"
         );
 
-        let taken = store.alloc_ip(&obd, &host, name("db"), None).await;
+        let taken = store
+            .alloc_ip(&Actor::ROOT, &obd, &host, name("db"), None)
+            .await;
         assert!(matches!(taken, Err(ObeliskdError::Conflict(_))));
 
         // Freed addresses are handed out again, lowest first.
         store
-            .dealloc_ip(&obd, &host, &name("db"), false)
+            .dealloc_ip(&Actor::ROOT, &obd, &host, &name("db"), false)
             .await
             .unwrap();
         let again = store
-            .alloc_ip(&obd, &host, name("cache"), None)
+            .alloc_ip(&Actor::ROOT, &obd, &host, name("cache"), None)
             .await
             .unwrap();
         assert_eq!(again.ip.address.to_string(), "10.57.0.1");
@@ -1396,15 +1774,21 @@ mod tests {
         let store = load(dir.path());
         let obd = name("obd");
         store
-            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
         store
-            .alloc_subnet(&obd, name("host"), SubnetKind::Host, 24, None)
+            .alloc_subnet(&Actor::ROOT, &obd, name("host"), SubnetKind::Host, 24, None)
             .await
             .unwrap();
         let tagged = store
-            .alloc_ip(&obd, &name("host"), name("db"), Some(name("pr-42")))
+            .alloc_ip(
+                &Actor::ROOT,
+                &obd,
+                &name("host"),
+                name("db"),
+                Some(name("pr-42")),
+            )
             .await
             .unwrap();
         assert_eq!(tagged.ip.tag, Some(name("pr-42")));
@@ -1422,20 +1806,33 @@ mod tests {
         let tag = name("pr-42");
         for (supernet, cidr) in [(&obd, "10.57.0.0/16"), (&other, "10.58.0.0/16")] {
             store
-                .alloc_supernet(supernet.clone(), cidr.parse().unwrap())
+                .alloc_supernet(&Actor::ROOT, supernet.clone(), cidr.parse().unwrap())
                 .await
                 .unwrap();
             for subnet in ["a", "b"] {
                 store
-                    .alloc_subnet(supernet, name(subnet), SubnetKind::Host, 24, None)
+                    .alloc_subnet(
+                        &Actor::ROOT,
+                        supernet,
+                        name(subnet),
+                        SubnetKind::Host,
+                        24,
+                        None,
+                    )
                     .await
                     .unwrap();
                 store
-                    .alloc_ip(supernet, &name(subnet), name("db"), Some(tag.clone()))
+                    .alloc_ip(
+                        &Actor::ROOT,
+                        supernet,
+                        &name(subnet),
+                        name("db"),
+                        Some(tag.clone()),
+                    )
                     .await
                     .unwrap();
                 store
-                    .alloc_ip(supernet, &name(subnet), name("web"), None)
+                    .alloc_ip(&Actor::ROOT, supernet, &name(subnet), name("web"), None)
                     .await
                     .unwrap();
             }
@@ -1454,24 +1851,26 @@ mod tests {
 
         // Narrowed to one subnet, then one supernet, then everywhere left.
         let removed = store
-            .dealloc_ips_tagged(Some(&obd), Some(&name("a")), &tag, false)
+            .dealloc_ips_tagged(&Actor::ROOT, Some(&obd), Some(&name("a")), &tag, false)
             .await
             .unwrap();
         assert_eq!(paths(&removed), ["obd/a/db"]);
         assert_eq!(os.calls().last().unwrap(), "remove ip a/db 10.57.0.1");
         let removed = store
-            .dealloc_ips_tagged(Some(&obd), None, &tag, false)
+            .dealloc_ips_tagged(&Actor::ROOT, Some(&obd), None, &tag, false)
             .await
             .unwrap();
         assert_eq!(paths(&removed), ["obd/b/db"]);
         let removed = store
-            .dealloc_ips_tagged(None, None, &tag, false)
+            .dealloc_ips_tagged(&Actor::ROOT, None, None, &tag, false)
             .await
             .unwrap();
         assert_eq!(paths(&removed), ["other/a/db", "other/b/db"]);
 
         // Nothing tagged is left; the untagged ips stayed, also on disk.
-        let none = store.dealloc_ips_tagged(None, None, &tag, false).await;
+        let none = store
+            .dealloc_ips_tagged(&Actor::ROOT, None, None, &tag, false)
+            .await;
         assert!(matches!(none, Err(ObeliskdError::NotFound(m)) if m == "no ips tagged pr-42"));
         let left = load(dir.path()).ips(None, None).await.unwrap();
         assert_eq!(left.len(), 4);
@@ -1486,18 +1885,19 @@ mod tests {
         let tag = name("pr-42");
         assert!(matches!(
             store
-                .dealloc_ips_tagged(None, Some(&name("host")), &tag, false)
+                .dealloc_ips_tagged(&Actor::ROOT, None, Some(&name("host")), &tag, false)
                 .await,
             Err(ObeliskdError::Invalid(_))
         ));
         assert!(matches!(
             store
-                .dealloc_ips_tagged(Some(&name("x")), None, &tag, false)
+                .dealloc_ips_tagged(&Actor::ROOT, Some(&name("x")), None, &tag, false)
                 .await,
             Err(ObeliskdError::NotFound(_))
         ));
         let elsewhere = store
             .dealloc_ips_tagged(
+                &Actor::ROOT,
                 Some(&name("obd")),
                 Some(&name("host")),
                 &name("pr-7"),
@@ -1511,28 +1911,360 @@ mod tests {
         assert_eq!(store.ips(None, None).await.unwrap().len(), 1);
     }
 
+    const KALIN: fn() -> Actor = || Actor {
+        uid: 1000,
+        gids: vec![1000, 984],
+    };
+
+    /// obd (10.57.0.0/16) with host subnets a and b, as root.
+    async fn with_subnets(store: &Store) {
+        let obd = name("obd");
+        store
+            .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .await
+            .unwrap();
+        for subnet in ["a", "b"] {
+            store
+                .alloc_subnet(&Actor::ROOT, &obd, name(subnet), SubnetKind::Host, 24, None)
+                .await
+                .unwrap();
+        }
+    }
+
+    fn forbidden<T>(result: &Result<T, ObeliskdError>) -> bool {
+        matches!(result, Err(ObeliskdError::Forbidden(_)))
+    }
+
+    fn obd() -> Scope {
+        Scope::Supernet(name("obd"))
+    }
+
+    fn obd_a() -> Scope {
+        Scope::Subnet(name("obd"), name("a"))
+    }
+
+    fn grant(who: Principal, role: Role) -> Grant {
+        Grant { who, role }
+    }
+
+    #[tokio::test]
+    async fn grants_persist_with_their_scope_and_go_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = load(dir.path());
+        with_subnets(&store).await;
+        let root = &Actor::ROOT;
+        store
+            .grant(root, Scope::All, grant(Principal::Group(984), Role::Use))
+            .await
+            .unwrap();
+        store
+            .grant(root, obd(), grant(Principal::User(1000), Role::Manage))
+            .await
+            .unwrap();
+        store
+            .grant(root, obd_a(), grant(Principal::Everyone, Role::Use))
+            .await
+            .unwrap();
+
+        let read = |file: &str| std::fs::read_to_string(dir.path().join(file)).unwrap();
+        assert!(read("config.toml").contains("who = \"group:984\""));
+        assert!(read("alloc/obd.toml").contains("who = \"user:1000\""));
+        assert!(read("alloc/obd/a.toml").contains("who = \"everyone\""));
+        let all = load(dir.path()).grants(&Scope::All, None).await.unwrap();
+        assert_eq!(
+            all,
+            [
+                (Scope::All, grant(Principal::Group(984), Role::Use)),
+                (obd(), grant(Principal::User(1000), Role::Manage)),
+                (obd_a(), grant(Principal::Everyone, Role::Use)),
+            ],
+            "reloaded, in tree order"
+        );
+        assert_eq!(
+            store.grants(&obd(), None).await.unwrap().len(),
+            2,
+            "obd and inside it"
+        );
+        assert_eq!(
+            store
+                .grants(&Scope::All, Some(Principal::Everyone))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // A subnet's grants go with it; the whole tree's file goes when it has none.
+        store
+            .dealloc_subnet(root, &name("obd"), &name("a"), false)
+            .await
+            .unwrap();
+        assert_eq!(store.grants(&Scope::All, None).await.unwrap().len(), 2);
+        store
+            .revoke(root, Scope::All, Principal::Group(984))
+            .await
+            .unwrap();
+        assert!(!dir.path().join("config.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn roles_inherit_down_and_gate_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = load(dir.path());
+        with_subnets(&store).await;
+        let (obd_name, a) = (name("obd"), name("a"));
+
+        let denied = store
+            .alloc_ip(&KALIN(), &obd_name, &a, name("db"), None)
+            .await;
+        assert!(
+            matches!(&denied, Err(ObeliskdError::Forbidden(m)) if m == "uid 1000 needs use on subnet obd/a (has nothing); ask an admin of it, or use sudo"),
+            "{denied:?}"
+        );
+
+        // Through a group, granted on the supernet: use reaches its subnets.
+        store
+            .grant(&Actor::ROOT, obd(), grant(Principal::Group(984), Role::Use))
+            .await
+            .unwrap();
+        store
+            .alloc_ip(&KALIN(), &obd_name, &a, name("db"), None)
+            .await
+            .unwrap();
+        store
+            .alloc_host(&KALIN(), host_on("app.obd.internal", "a", "db"))
+            .await
+            .unwrap();
+        assert!(forbidden(
+            &store
+                .alloc_subnet(&KALIN(), &obd_name, name("c"), SubnetKind::Host, 24, None)
+                .await
+        ));
+
+        // Manage on the supernet: subnets too; supernets stay root-only, whatever the grant.
+        store
+            .grant(
+                &Actor::ROOT,
+                Scope::All,
+                grant(Principal::User(1000), Role::Admin),
+            )
+            .await
+            .unwrap();
+        store
+            .alloc_subnet(&KALIN(), &obd_name, name("c"), SubnetKind::Host, 24, None)
+            .await
+            .unwrap();
+        assert!(forbidden(
+            &store
+                .alloc_supernet(&KALIN(), name("ex"), "10.58.0.0/16".parse().unwrap())
+                .await
+        ));
+        assert!(forbidden(
+            &store.dealloc_supernet(&KALIN(), &obd_name, true).await
+        ));
+
+        // Unknown places are still 404, not 403.
+        let missing = store
+            .alloc_ip(&KALIN(), &obd_name, &name("zz"), name("x"), None)
+            .await;
+        assert!(
+            matches!(missing, Err(ObeliskdError::NotFound(_))),
+            "{missing:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn admins_grant_only_within_their_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = load(dir.path());
+        with_subnets(&store).await;
+        assert!(forbidden(
+            &store
+                .grant(&KALIN(), obd_a(), grant(Principal::Everyone, Role::Use))
+                .await
+        ));
+        store
+            .grant(
+                &Actor::ROOT,
+                obd_a(),
+                grant(Principal::User(1000), Role::Admin),
+            )
+            .await
+            .unwrap();
+
+        store
+            .grant(&KALIN(), obd_a(), grant(Principal::User(4242), Role::Use))
+            .await
+            .unwrap();
+        store
+            .grant(
+                &KALIN(),
+                obd_a(),
+                grant(Principal::User(4242), Role::Manage),
+            )
+            .await
+            .unwrap();
+        let theirs = store
+            .grants(&obd_a(), Some(Principal::User(4242)))
+            .await
+            .unwrap();
+        assert_eq!(
+            theirs,
+            [(obd_a(), grant(Principal::User(4242), Role::Manage))],
+            "replaced"
+        );
+
+        assert!(forbidden(
+            &store
+                .grant(&KALIN(), obd(), grant(Principal::User(4242), Role::Use))
+                .await
+        ));
+        assert!(forbidden(
+            &store
+                .revoke(&KALIN(), Scope::All, Principal::User(1000))
+                .await
+        ));
+        store
+            .revoke(&KALIN(), obd_a(), Principal::User(4242))
+            .await
+            .unwrap();
+        let gone = store.revoke(&KALIN(), obd_a(), Principal::User(4242)).await;
+        assert!(
+            matches!(&gone, Err(ObeliskdError::NotFound(m)) if m == "user:4242 has no grant on subnet obd/a"),
+            "{gone:?}"
+        );
+        let nowhere = store
+            .grant(
+                &Actor::ROOT,
+                Scope::Supernet(name("nope")),
+                grant(Principal::Everyone, Role::Use),
+            )
+            .await;
+        assert!(matches!(nowhere, Err(ObeliskdError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn dealloc_by_tag_needs_use_everywhere_it_reaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = load(dir.path());
+        with_subnets(&store).await;
+        let (obd_name, tag) = (name("obd"), name("pr-42"));
+        for subnet in ["a", "b"] {
+            store
+                .alloc_ip(
+                    &Actor::ROOT,
+                    &obd_name,
+                    &name(subnet),
+                    name("db"),
+                    Some(tag.clone()),
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .grant(
+                &Actor::ROOT,
+                obd_a(),
+                grant(Principal::User(1000), Role::Use),
+            )
+            .await
+            .unwrap();
+
+        let denied = store
+            .dealloc_ips_tagged(&KALIN(), None, None, &tag, false)
+            .await;
+        assert!(
+            matches!(&denied, Err(ObeliskdError::Forbidden(m)) if m.starts_with("uid 1000 needs use on subnet obd/b ")),
+            "{denied:?}"
+        );
+        assert_eq!(
+            store.ips(None, None).await.unwrap().len(),
+            2,
+            "nothing was removed"
+        );
+        let removed = store
+            .dealloc_ips_tagged(&KALIN(), Some(&obd_name), Some(&name("a")), &tag, false)
+            .await
+            .unwrap();
+        assert_eq!(removed[0].subnets[0].name, name("a"));
+    }
+
+    #[tokio::test]
+    async fn effective_roles_count_groups_everyone_and_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = load(dir.path());
+        with_subnets(&store).await;
+        let root = &Actor::ROOT;
+        store
+            .grant(root, Scope::All, grant(Principal::Everyone, Role::Use))
+            .await
+            .unwrap();
+        store
+            .grant(root, obd(), grant(Principal::Group(984), Role::Manage))
+            .await
+            .unwrap();
+        store
+            .grant(root, obd_a(), grant(Principal::User(4242), Role::Admin))
+            .await
+            .unwrap();
+
+        let mine = store.effective(&KALIN(), None).await.unwrap();
+        let summary: Vec<(Scope, Role, usize)> = mine
+            .iter()
+            .map(|e| (e.scope.clone(), e.role, e.from.len()))
+            .collect();
+        assert_eq!(
+            summary,
+            [(Scope::All, Role::Use, 1), (obd(), Role::Manage, 2)]
+        );
+
+        let on_a = store.effective(&KALIN(), Some(&obd_a())).await.unwrap();
+        assert_eq!(on_a[0].role, Role::Manage, "inherited from obd");
+        let stranger = Actor {
+            uid: 4242,
+            gids: vec![4242],
+        };
+        assert_eq!(
+            store.effective(&stranger, Some(&obd_a())).await.unwrap()[0].role,
+            Role::Admin
+        );
+        let rooted = store.effective(root, None).await.unwrap();
+        assert_eq!(
+            (rooted[0].scope.clone(), rooted[0].role),
+            (Scope::All, Role::Admin)
+        );
+        assert!(matches!(
+            store
+                .effective(&KALIN(), Some(&Scope::Supernet(name("nope"))))
+                .await,
+            Err(ObeliskdError::NotFound(_))
+        ));
+    }
+
     #[tokio::test]
     async fn subnets_with_ips_need_recursive() {
         let dir = tempfile::tempdir().unwrap();
         let (store, os) = load_with(dir.path());
         let obd = name("obd");
         store
-            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
         store
-            .alloc_subnet(&obd, name("host"), SubnetKind::Host, 24, None)
+            .alloc_subnet(&Actor::ROOT, &obd, name("host"), SubnetKind::Host, 24, None)
             .await
             .unwrap();
         store
-            .alloc_ip(&obd, &name("host"), name("db"), None)
+            .alloc_ip(&Actor::ROOT, &obd, &name("host"), name("db"), None)
             .await
             .unwrap();
 
-        let busy = store.dealloc_subnet(&obd, &name("host"), false).await;
+        let busy = store
+            .dealloc_subnet(&Actor::ROOT, &obd, &name("host"), false)
+            .await;
         assert!(matches!(busy, Err(ObeliskdError::Conflict(m)) if m.contains("still has 1 ip;")));
         let removed = store
-            .dealloc_subnet(&obd, &name("host"), true)
+            .dealloc_subnet(&Actor::ROOT, &obd, &name("host"), true)
             .await
             .unwrap();
         assert_eq!(removed.ips.len(), 1);
@@ -1555,7 +2287,7 @@ mod tests {
             Err(ObeliskdError::NotFound(_))
         ));
         let missing = store
-            .alloc_ip(&name("x"), &name("y"), name("z"), None)
+            .alloc_ip(&Actor::ROOT, &name("x"), &name("y"), name("z"), None)
             .await;
         assert!(matches!(missing, Err(ObeliskdError::NotFound(_))));
     }
@@ -1563,17 +2295,32 @@ mod tests {
     async fn with_ip(store: &Store) {
         let obd = name("obd");
         store
-            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .alloc_supernet(&Actor::ROOT, obd.clone(), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
         store
-            .alloc_subnet(&obd, name("host"), SubnetKind::Host, 24, None)
+            .alloc_subnet(&Actor::ROOT, &obd, name("host"), SubnetKind::Host, 24, None)
             .await
             .unwrap();
         store
-            .alloc_ip(&obd, &name("host"), name("web"), Some(name("pr-42")))
+            .alloc_ip(
+                &Actor::ROOT,
+                &obd,
+                &name("host"),
+                name("web"),
+                Some(name("pr-42")),
+            )
             .await
             .unwrap();
+    }
+
+    fn host_on(hostname: &str, subnet: &str, ip: &str) -> Host {
+        Host {
+            name: Hostname::parse(hostname).unwrap(),
+            supernet: name("obd"),
+            subnet: name(subnet),
+            ip: name(ip),
+        }
     }
 
     fn host(hostname: &str) -> Host {
@@ -1592,9 +2339,15 @@ mod tests {
         with_ip(&store).await;
         let table = store.host_table();
 
-        let app = store.alloc_host(host("app.obd.internal")).await.unwrap();
+        let app = store
+            .alloc_host(&Actor::ROOT, host("app.obd.internal"))
+            .await
+            .unwrap();
         assert_eq!(app.address.to_string(), "10.57.0.1");
-        store.alloc_host(host("admin.obd.internal")).await.unwrap();
+        store
+            .alloc_host(&Actor::ROOT, host("admin.obd.internal"))
+            .await
+            .unwrap();
         assert_eq!(
             table
                 .read()
@@ -1605,12 +2358,14 @@ mod tests {
             "DNS sees it without a restart"
         );
 
-        let taken = store.alloc_host(host("app.obd.internal")).await;
+        let taken = store
+            .alloc_host(&Actor::ROOT, host("app.obd.internal"))
+            .await;
         assert!(matches!(taken, Err(ObeliskdError::Conflict(_))));
         let mut missing = host("x.obd.internal");
         missing.ip = name("nope");
         assert!(matches!(
-            store.alloc_host(missing).await,
+            store.alloc_host(&Actor::ROOT, missing).await,
             Err(ObeliskdError::NotFound(_))
         ));
 
@@ -1633,19 +2388,20 @@ mod tests {
         );
 
         store
-            .dealloc_host(&Hostname::parse("app.obd.internal").unwrap())
+            .dealloc_host(&Actor::ROOT, &Hostname::parse("app.obd.internal").unwrap())
             .await
             .unwrap();
         assert!(table.read().unwrap().lookup("app.obd.internal").is_none());
         let file = std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap();
         assert!(!file.contains("app.obd.internal"), "{file}");
         let gone = store
-            .dealloc_host(&Hostname::parse("app.obd.internal").unwrap())
+            .dealloc_host(&Actor::ROOT, &Hostname::parse("app.obd.internal").unwrap())
             .await;
         assert!(matches!(gone, Err(ObeliskdError::NotFound(_))));
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // a table of cases
     async fn recursive_deallocs_take_hosts_along() {
         type Dealloc =
             fn(&Store) -> std::pin::Pin<Box<dyn Future<Output = Result<(), ObeliskdError>> + '_>>;
@@ -1654,16 +2410,28 @@ mod tests {
                 "ip",
                 |s| {
                     Box::pin(async {
-                        s.dealloc_ip(&name("obd"), &name("host"), &name("web"), false)
-                            .await
-                            .map(|_| ())
+                        s.dealloc_ip(
+                            &Actor::ROOT,
+                            &name("obd"),
+                            &name("host"),
+                            &name("web"),
+                            false,
+                        )
+                        .await
+                        .map(|_| ())
                     })
                 },
                 |s| {
                     Box::pin(async {
-                        s.dealloc_ip(&name("obd"), &name("host"), &name("web"), true)
-                            .await
-                            .map(|_| ())
+                        s.dealloc_ip(
+                            &Actor::ROOT,
+                            &name("obd"),
+                            &name("host"),
+                            &name("web"),
+                            true,
+                        )
+                        .await
+                        .map(|_| ())
                     })
                 },
             ),
@@ -1671,14 +2439,14 @@ mod tests {
                 "subnet",
                 |s| {
                     Box::pin(async {
-                        s.dealloc_subnet(&name("obd"), &name("host"), false)
+                        s.dealloc_subnet(&Actor::ROOT, &name("obd"), &name("host"), false)
                             .await
                             .map(|_| ())
                     })
                 },
                 |s| {
                     Box::pin(async {
-                        s.dealloc_subnet(&name("obd"), &name("host"), true)
+                        s.dealloc_subnet(&Actor::ROOT, &name("obd"), &name("host"), true)
                             .await
                             .map(|_| ())
                     })
@@ -1688,14 +2456,14 @@ mod tests {
                 "tag",
                 |s| {
                     Box::pin(async {
-                        s.dealloc_ips_tagged(None, None, &name("pr-42"), false)
+                        s.dealloc_ips_tagged(&Actor::ROOT, None, None, &name("pr-42"), false)
                             .await
                             .map(|_| ())
                     })
                 },
                 |s| {
                     Box::pin(async {
-                        s.dealloc_ips_tagged(None, None, &name("pr-42"), true)
+                        s.dealloc_ips_tagged(&Actor::ROOT, None, None, &name("pr-42"), true)
                             .await
                             .map(|_| ())
                     })
@@ -1703,15 +2471,30 @@ mod tests {
             ),
             (
                 "supernet",
-                |s| Box::pin(async { s.dealloc_supernet(&name("obd"), false).await.map(|_| ()) }),
-                |s| Box::pin(async { s.dealloc_supernet(&name("obd"), true).await.map(|_| ()) }),
+                |s| {
+                    Box::pin(async {
+                        s.dealloc_supernet(&Actor::ROOT, &name("obd"), false)
+                            .await
+                            .map(|_| ())
+                    })
+                },
+                |s| {
+                    Box::pin(async {
+                        s.dealloc_supernet(&Actor::ROOT, &name("obd"), true)
+                            .await
+                            .map(|_| ())
+                    })
+                },
             ),
         ];
         for (level, plain, recursive) in levels {
             let dir = tempfile::tempdir().unwrap();
             let store = load(dir.path());
             with_ip(&store).await;
-            store.alloc_host(host("app.obd.internal")).await.unwrap();
+            store
+                .alloc_host(&Actor::ROOT, host("app.obd.internal"))
+                .await
+                .unwrap();
             let table = store.host_table();
 
             let error = plain(&store).await.unwrap_err();

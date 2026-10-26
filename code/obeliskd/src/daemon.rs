@@ -11,6 +11,7 @@ use crate::control::api::DaemonInfo;
 use crate::control::server::AppState;
 use crate::os::SystemOs;
 use crate::state::Store;
+use crate::users::SystemUsers;
 use crate::{ObeliskdError, Platform, PlatformImpl, control, dns};
 
 /// Runs the daemon until a shutdown signal: answers DNS on `dns_address`, serves the control API
@@ -73,7 +74,7 @@ pub async fn run(
     let hosts = store.host_table();
     // The control server stops gracefully on the signal; DNS stops when it does.
     let result = tokio::select! {
-        result = control::server::serve(listener, AppState { daemon, store }, Platform::shutdown_signal()) => result,
+        result = control::server::serve(listener, AppState { daemon, store, users: Arc::new(SystemUsers) }, Platform::shutdown_signal()) => result,
         () = dns::serve(dns_socket, hosts) => unreachable!("DNS serves until dropped"),
     };
     info!("shutting down");

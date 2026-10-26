@@ -54,8 +54,7 @@ pub trait PlatformImpl {
     /// [`ObeliskdError::StateDir`] if it can't be created, or fails the checks.
     fn prepare_state_dir(dir: &Path) -> Result<(), ObeliskdError>;
 
-    /// The daemon's own (effective) user id. Callers with it are trusted like root, so a daemon
-    /// run as yourself (in development) can be managed by yourself.
+    /// The daemon's own (effective) user id; it must be root to run.
     fn current_uid() -> u32;
 
     /// Undoes [`ensure_local_address`](Self::ensure_local_address) for an address obeliskd made
@@ -96,6 +95,23 @@ pub trait PlatformImpl {
     ///
     /// [`ObeliskdError::Os`] if the OS refuses.
     fn remove_supernet_route(cidr: Ipv4Net) -> Result<(), ObeliskdError>;
+
+    /// A user's id by name, from the user database.
+    fn user_id(name: &str) -> Option<u32>;
+
+    /// A user's name by id.
+    fn user_name(uid: u32) -> Option<String>;
+
+    /// A group's id by name, from the group database.
+    fn group_id(name: &str) -> Option<u32>;
+
+    /// A group's name by id.
+    fn group_name(gid: u32) -> Option<String>;
+
+    /// Every group the user is in (primary included), from the database rather than a process's
+    /// credentials: joining a group counts right away, without logging in again. Empty for a uid
+    /// with no account.
+    fn groups_of(uid: u32) -> Vec<u32>;
 
     /// Where the daemon listens for control connections, unless told otherwise.
     fn control_socket_path() -> PathBuf;

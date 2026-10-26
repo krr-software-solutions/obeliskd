@@ -1,13 +1,16 @@
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 
-use super::{Name, Subnet};
+use super::{Grant, Name, Subnet};
 
 /// A logical range that subnets are carved from: a name and a CIDR, plus its subnets.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Supernet {
     pub name: Name,
     pub cidr: Ipv4Net,
+    /// Roles on it (and so on everything in it); at most one per principal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<Grant>,
     /// Names are unique within the supernet, and ranges don't overlap.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subnets: Vec<Subnet>,
@@ -50,6 +53,7 @@ mod tests {
         let obd = Supernet {
             name: Name::parse("obd").unwrap(),
             cidr: net("10.57.0.0/16"),
+            grants: Vec::new(),
             subnets: Vec::new(),
         };
         assert!(obd.overlaps(&net("10.57.22.0/24"))); // inside

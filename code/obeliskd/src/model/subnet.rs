@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 
-use super::{Ip, Name};
+use super::{Grant, Ip, Name};
 
 /// What a subnet's addresses are for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +39,9 @@ pub struct Subnet {
     /// subnet's first usable address (`.1`), inside Docker's slice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_gateway: Option<Ipv4Addr>,
+    /// Roles on it (and so on its ips and hosts); at most one per principal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<Grant>,
     /// Names are unique within the subnet, and so are addresses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ips: Vec<Ip>,

@@ -2,12 +2,12 @@
 //!
 //! ```text
 //! <state dir>/
-//! ├── config.toml                  daemon settings (none yet); never allocations
+//! ├── config.toml                  daemon settings: [[grants]] on the whole tree; never allocations
 //! └── alloc/
-//!     ├── <supernet>.toml          a supernet: name, cidr
+//!     ├── <supernet>.toml          a supernet: name, cidr, [[grants]] on it
 //!     └── <supernet>/
-//!         └── <subnet>.toml        a subnet (kind, cidr, docker range/gateway) and its [[ips]],
-//!                                  each with the hostnames that resolve to it
+//!         └── <subnet>.toml        a subnet (kind, cidr, docker range/gateway), [[grants]] on it,
+//!                                  and its [[ips]], each with the hostnames that resolve to it
 //! ```
 //!
 //! A file's `name` must match its filename, and a `<supernet>/` dir needs its `<supernet>.toml`.
@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Config;
 use crate::ObeliskdError;
-use crate::model::{Name, Subnet, Supernet, subnet};
+use crate::model::{Grant, Name, Subnet, Supernet, subnet};
 
 pub const CONFIG_FILE: &str = "config.toml";
 pub const ALLOC_DIR: &str = "alloc";
@@ -39,6 +39,8 @@ const TOML_SUFFIX: &str = ".toml";
 struct SupernetFile {
     name: Name,
     cidr: Ipv4Net,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    grants: Vec<Grant>,
 }
 
 impl SupernetFile {
@@ -46,15 +48,25 @@ impl SupernetFile {
         SupernetFile {
             name: supernet.name.clone(),
             cidr: supernet.cidr,
+            grants: supernet.grants.clone(),
         }
     }
 }
 
-/// Older versions kept allocations in `config.toml`: supernets, with subnets nested in them.
+/// `config.toml`: the grants on the whole tree. Older versions also kept allocations here
+/// (supernets, with subnets nested in them); they're moved out on load.
 #[derive(Debug, Default, Deserialize)]
-struct LegacyConfig {
+struct ConfigFile {
     #[serde(default)]
     supernets: Vec<LegacySupernet>,
+    #[serde(default)]
+    grants: Vec<Grant>,
+}
+
+/// What's written to `config.toml`.
+#[derive(Serialize)]
+struct ConfigFileOut<'a> {
+    grants: &'a [Grant],
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,16 +102,20 @@ fn subnet_path(dir: &Path, supernet: &Name, subnet: &Name) -> PathBuf {
 /// defined twice, a `<supernet>/` dir has no `<supernet>.toml`, or `alloc/` holds anything else.
 /// The daemon refuses to start rather than risk overwriting state it couldn't make sense of.
 pub fn load(dir: &Path) -> Result<(Config, bool), ObeliskdError> {
-    let legacy = read_legacy(dir)?;
+    let legacy = read_config(dir)?;
     let migrated = !legacy.supernets.is_empty();
 
     let (files, subnet_dirs) = scan_alloc(dir)?;
-    let mut config = Config::default();
+    let mut config = Config {
+        grants: legacy.grants,
+        ..Config::default()
+    };
     for file in files {
         let subnets = read_subnets(dir, &file.name)?;
         config.supernets.push(Supernet {
             name: file.name,
             cidr: file.cidr,
+            grants: file.grants,
             subnets,
         });
     }
@@ -116,6 +132,7 @@ pub fn load(dir: &Path) -> Result<(Config, bool), ObeliskdError> {
         config.supernets.push(Supernet {
             name: legacy.name,
             cidr: legacy.cidr,
+            grants: Vec::new(),
             subnets: legacy.subnets,
         });
     }
@@ -156,13 +173,13 @@ pub fn load(dir: &Path) -> Result<(Config, bool), ObeliskdError> {
     Ok((config, migrated))
 }
 
-fn read_legacy(dir: &Path) -> Result<LegacyConfig, ObeliskdError> {
+fn read_config(dir: &Path) -> Result<ConfigFile, ObeliskdError> {
     let path = dir.join(CONFIG_FILE);
     match std::fs::read_to_string(&path) {
         Ok(text) => {
             toml::from_str(&text).map_err(|source| ObeliskdError::StateParse { path, source })
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LegacyConfig::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ConfigFile::default()),
         Err(source) => Err(ObeliskdError::StateRead { path, source }),
     }
 }
@@ -302,7 +319,21 @@ pub fn persist(dir: &Path, old: &Config, next: &Config) -> Result<(), ObeliskdEr
         }
     }
 
-    // 2. Additions and changes, only where something differs: a supernet's file before its
+    // 2. The whole tree's grants (the file goes when there are none).
+    if old.grants != next.grants {
+        let path = dir.join(CONFIG_FILE);
+        if next.grants.is_empty() {
+            remove(&path, |p| std::fs::remove_file(p))?;
+        } else {
+            let body = toml::to_string(&ConfigFileOut {
+                grants: &next.grants,
+            })
+            .expect("grants serialize");
+            write_atomic(&path, &body)?;
+        }
+    }
+
+    // 3. Additions and changes, only where something differs: a supernet's file before its
     //    subnets'.
     for supernet in &next.supernets {
         let before = old.supernets.iter().find(|s| s.name == supernet.name);

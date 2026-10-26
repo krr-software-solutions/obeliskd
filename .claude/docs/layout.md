@@ -38,8 +38,9 @@ socket, and serves both until the shutdown signal.
 
   Only files that changed are written. Removals go first (subnet files, then the supernet's dir,
   then its file) and additions after (a supernet's file before its subnets'), so a crash part-way
-  leaves something smaller but consistent. `config.toml` is for daemon settings, never
-  allocations.
+  leaves something smaller but consistent. `config.toml` is for daemon settings (the grants on
+  the whole tree), never allocations. Grants on a supernet or subnet live in its file
+  (`[[grants]] who = "group:984" role = "manage"`), so they go when it does.
 
 **Deallocating is refused (409) while something is below, unless `--recursive`** (`?recursive=true`).
 Recursive removes everything below, **hosts included**:
@@ -54,7 +55,7 @@ Recursive removes everything below, **hosts included**:
 
 The routes are `DELETE /supernets/{supernet}`, `/subnets/{supernet}/{subnet}` and
 `/ips/{supernet}/{subnet}/{ip}`, plus `DELETE /ips?tag=…[&supernet=…[&subnet=…]]` for every ip
-with a tag (Admin). Each returns everything it removed. Removing by tag is all or nothing, and a tag
+with a tag. Each returns everything it removed. Removing by tag is all or nothing, and a tag
 that matches nothing is a 404, like any other unknown name.
 
 The tree is supernet → subnet → ip. `Ip` (nested in its subnet) is a name plus an address that
@@ -132,22 +133,33 @@ HTTP over the control socket: the daemon serves it with axum, and the CLI calls 
 - `api.rs`: the wire types, shared by both sides (camelCase JSON). Errors are `{ "error": "…" }`.
 - `server.rs`: the router, the handlers, and `run` (bind, serve until SIGTERM/Ctrl-C, unbind).
 - `client.rs`: `ControlClient`, with one method per endpoint.
-- `auth.rs`: who may call what. `Peer` (uid, gid, pid) is captured from the kernel once per
-  connection (`ConnInfo`, via axum's `ConnectInfo`). A handler states what it needs by taking an
-  extractor:
-  - `Caller`: any user allowed on the socket;
-  - `Admin`: root;
-  - neither: anyone who can connect. **All reads work this way** (`/health`, `GET /supernets`):
-    nothing obeliskd holds is secret, and needing `sudo` just to look would be friction. Every
-    change needs `Admin` (or `Caller`, once access grants exist).
+- `auth.rs`: who is calling. `Peer` (uid, gid, pid) is captured from the kernel once per
+  connection (`ConnInfo`, via axum's `ConnectInfo`). **Reads take nothing**: nothing obeliskd holds
+  is secret, and needing `sudo` just to look would be friction. **Changes take an `Actor`**: the
+  uid plus every group the user is in, looked up by uid through `AppState::users` (`users.rs`;
+  the kernel only reports the connection's primary gid). The handler passes the actor to the store,
+  which checks it under the same lock as the change (403 `Forbidden`, after a 404 for unknown names).
 
-  Admin means root **or the daemon's own uid**. The daemon now always runs as root, so this is
-  just root. Requests are parsed first and then rejected with 403. That's intended: there's no
-  check-before-read.
+**Grants** (`model/grant.rs`): a `Principal` (`user:<uid>`, `group:<gid>`, `everyone`, stored by
+number) gets a `Role` on a `Scope` (`*`, a supernet, a subnet), at most one per principal and scope.
+Grants only add, and cover everything inside their scope.
+
+| Change | Needs |
+|---|---|
+| ip and host alloc/dealloc | `use` on the subnet (`ip dealloc --tag`: on every subnet it reaches) |
+| subnet alloc/dealloc | `manage` on the supernet |
+| grant add/remove | `admin` on that scope |
+| supernet alloc/dealloc | root, always (a supernet can overlap the LAN's or a VPN's routes) |
+
+Root has every role everywhere. A grant on a scope lets you change what's inside it, not the scope
+itself. Routes: `GET/POST/DELETE /grants` (`?supernet&subnet&user|group|everyone`) and
+`GET /grants/check?user&supernet&subnet` (what a user may do, counting groups, `everyone` and
+parents; the caller by default). Users and groups are named by name or number; responses carry
+both.
 
 To add an endpoint, add its types to `api.rs`, a handler and route in `server.rs`, and a method in
 `client.rs`. Domain errors map to statuses in `From<ObeliskdError> for ApiError`: `Invalid` → 400,
-`Conflict` → 409, everything else 500.
+`Forbidden` → 403, `NotFound` → 404, `Conflict` → 409, everything else 500.
 
 Every CLI command that talks to the daemon takes `--format pretty|json` (default `pretty`). JSON is
 the API type as-is, and pretty-printing lives in `obeliskd-cli/src/pretty.rs`.

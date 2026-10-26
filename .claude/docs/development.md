@@ -6,7 +6,10 @@
 cargo build && sudo ./target/debug/obeliskd --socket /tmp/o.sock daemon run --state-dir /tmp/obd-state --dns-address 127.0.0.79:5379
                                                               # the daemon always needs root (routes, docker)
 sudo ./target/debug/obeliskd --socket /tmp/o.sock supernet alloc --supernet obd --cidr 10.57.0.0/16
-                                                              # changes need root too; reads don't
+                                                              # supernets need root; reads need nothing
+sudo ./target/debug/obeliskd --socket /tmp/o.sock grant add --role manage --user "$USER" --supernet obd
+                                                              # then the rest works without sudo
+./target/debug/obeliskd --socket /tmp/o.sock grant check
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock supernet list --format json
 sudo ./target/debug/obeliskd --socket /tmp/o.sock subnet alloc --supernet obd --subnet k3d-dev --kind docker --size 24 --reserve-size 26
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock subnet list
@@ -29,8 +32,8 @@ cargo test --workspace --locked -- --ignored                 # + the real-Docker
 `--locked` matches CI: if `Cargo.lock` needs to change, commit the change.
 
 The default socket (`/run/obeliskd/obeliskd.sock` on Linux) needs root to create. For development,
-point both sides elsewhere with `--socket` or `OBELISKD_SOCKET`. Only root passes the `Caller` and
-`Admin` checks for now, but `/health` is open to anyone.
+point both sides elsewhere with `--socket` or `OBELISKD_SOCKET`. Reads are open to anyone; changes
+need root or a grant (see `grant add`).
 
 ## CI (`.gitlab-ci.yml`)
 

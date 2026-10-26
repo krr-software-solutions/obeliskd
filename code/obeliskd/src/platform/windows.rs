@@ -76,6 +76,26 @@ impl PlatformImpl for Windows {
         todo!("a blackhole route on Windows")
     }
 
+    fn user_id(_name: &str) -> Option<u32> {
+        todo!("users on Windows (SIDs)")
+    }
+
+    fn user_name(_uid: u32) -> Option<String> {
+        todo!("users on Windows (SIDs)")
+    }
+
+    fn group_id(_name: &str) -> Option<u32> {
+        todo!("groups on Windows (SIDs)")
+    }
+
+    fn group_name(_gid: u32) -> Option<String> {
+        todo!("groups on Windows (SIDs)")
+    }
+
+    fn groups_of(_uid: u32) -> Vec<u32> {
+        todo!("groups on Windows (SIDs)")
+    }
+
     fn control_socket_path() -> PathBuf {
         PathBuf::from(r"\\.\pipe\obeliskd")
     }

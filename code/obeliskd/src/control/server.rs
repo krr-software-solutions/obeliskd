@@ -12,14 +12,15 @@ use std::sync::Arc;
 
 use super::Peer;
 use super::api::{
-    DaemonInfo, Depth, ErrorBody, Health, HostAlloc, IpAlloc, IpDealloc, IpDeallocTagged, IpNode,
-    IpQuery, SubnetAlloc, SubnetDealloc, SubnetNode, SubnetQuery, SupernetAlloc, SupernetDealloc,
-    SupernetNode,
+    DaemonInfo, Depth, EffectiveNode, ErrorBody, GrantAdd, GrantCheck, GrantCheckQuery, GrantNode,
+    GrantQuery, Health, HostAlloc, IpAlloc, IpDealloc, IpDeallocTagged, IpNode, IpQuery,
+    SubnetAlloc, SubnetDealloc, SubnetNode, SubnetQuery, SupernetAlloc, SupernetDealloc,
+    SupernetNode, Who, WhoArg,
 };
-use super::auth::Admin;
-use crate::model::{Host, Hostname};
+use crate::model::{Actor, Grant, Host, Hostname, Principal, Scope};
 use crate::model::{Name, Supernet};
 use crate::state::{HostIn, Store};
+use crate::users::Users;
 use crate::{ObeliskdError, Platform, PlatformImpl};
 
 /// Per-connection info, captured once when the connection is accepted.
@@ -76,6 +77,7 @@ impl From<ObeliskdError> for ApiError {
             ObeliskdError::Invalid(_) => StatusCode::BAD_REQUEST,
             ObeliskdError::Conflict(_) => StatusCode::CONFLICT,
             ObeliskdError::NotFound(_) => StatusCode::NOT_FOUND,
+            ObeliskdError::Forbidden(_) => StatusCode::FORBIDDEN,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError {
@@ -101,6 +103,8 @@ impl IntoResponse for ApiError {
 pub struct AppState {
     pub daemon: DaemonInfo,
     pub store: Arc<Store>,
+    /// Names ↔ ids, and the groups a caller is in.
+    pub users: Arc<dyn Users>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -117,6 +121,11 @@ pub fn router(state: AppState) -> Router {
         .route("/ips/{supernet}/{subnet}/{ip}", delete(dealloc_ip))
         .route("/hosts", get(list_hosts).post(alloc_host))
         .route("/hosts/{host}", delete(dealloc_host))
+        .route(
+            "/grants",
+            get(list_grants).post(add_grant).delete(remove_grant),
+        )
+        .route("/grants/check", get(check_grants))
         .layer(axum::middleware::from_fn(log_request))
         .with_state(state)
 }
@@ -154,7 +163,6 @@ async fn health(
     }))
 }
 
-/// Reads are open to anyone who can connect; changes need [`Admin`].
 fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     body.map(|Json(b)| b)
         .map_err(|e| ApiError::bad_request(e.body_text()))
@@ -225,14 +233,14 @@ async fn list_supernets(
 }
 
 async fn alloc_supernet(
-    _: Admin,
+    actor: Actor,
     State(state): State<AppState>,
     request: Result<Json<SupernetAlloc>, JsonRejection>,
 ) -> Result<(StatusCode, Json<SupernetNode>), ApiError> {
     let request = json_body(request)?;
     let supernet = state
         .store
-        .alloc_supernet(request.name, request.cidr)
+        .alloc_supernet(&actor, request.name, request.cidr)
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -241,7 +249,7 @@ async fn alloc_supernet(
 }
 
 async fn dealloc_supernet(
-    _: Admin,
+    actor: Actor,
     State(state): State<AppState>,
     name: Result<axum::extract::Path<Name>, PathRejection>,
     request: Result<Query<SupernetDealloc>, QueryRejection>,
@@ -249,7 +257,7 @@ async fn dealloc_supernet(
     let (name, request) = (path(name)?, query(request)?);
     let removed = state
         .store
-        .dealloc_supernet(&name, request.recursive)
+        .dealloc_supernet(&actor, &name, request.recursive)
         .await?;
     // Everything that went with it.
     Ok(Json(SupernetNode::of(&removed, Depth::Hosts)))
@@ -265,7 +273,7 @@ async fn list_subnets(
 }
 
 async fn alloc_subnet(
-    _: Admin,
+    actor: Actor,
     State(state): State<AppState>,
     request: Result<Json<SubnetAlloc>, JsonRejection>,
 ) -> Result<(StatusCode, Json<SupernetNode>), ApiError> {
@@ -273,6 +281,7 @@ async fn alloc_subnet(
     let subnet = state
         .store
         .alloc_subnet(
+            &actor,
             &request.supernet,
             request.name,
             request.kind,
@@ -288,7 +297,7 @@ async fn alloc_subnet(
 }
 
 async fn dealloc_subnet(
-    _: Admin,
+    actor: Actor,
     State(state): State<AppState>,
     names: Result<axum::extract::Path<(Name, Name)>, PathRejection>,
     request: Result<Query<SubnetDealloc>, QueryRejection>,
@@ -296,7 +305,7 @@ async fn dealloc_subnet(
     let ((supernet, name), request) = (path(names)?, query(request)?);
     let removed = state
         .store
-        .dealloc_subnet(&supernet, &name, request.recursive)
+        .dealloc_subnet(&actor, &supernet, &name, request.recursive)
         .await?;
     let node = SubnetNode::of(&removed, Depth::Hosts);
     Ok(Json(subnet_path(&state, &supernet, node).await?))
@@ -325,7 +334,7 @@ async fn list_ips(
 }
 
 async fn alloc_ip(
-    _: Admin,
+    actor: Actor,
     State(state): State<AppState>,
     request: Result<Json<IpAlloc>, JsonRejection>,
 ) -> Result<(StatusCode, Json<SupernetNode>), ApiError> {
@@ -333,6 +342,7 @@ async fn alloc_ip(
     let ip = state
         .store
         .alloc_ip(
+            &actor,
             &request.supernet,
             &request.subnet,
             request.name,
@@ -347,7 +357,7 @@ async fn alloc_ip(
 }
 
 async fn dealloc_ip(
-    _: Admin,
+    actor: Actor,
     State(state): State<AppState>,
     names: Result<axum::extract::Path<(Name, Name, Name)>, PathRejection>,
     request: Result<Query<IpDealloc>, QueryRejection>,
@@ -355,7 +365,7 @@ async fn dealloc_ip(
     let ((supernet, subnet, name), request) = (path(names)?, query(request)?);
     let removed = state
         .store
-        .dealloc_ip(&supernet, &subnet, &name, request.recursive)
+        .dealloc_ip(&actor, &supernet, &subnet, &name, request.recursive)
         .await?;
     // With any hosts it took along.
     let node = IpNode::of(&removed.ip, Depth::Hosts);
@@ -363,7 +373,7 @@ async fn dealloc_ip(
 }
 
 async fn dealloc_ips_tagged(
-    _: Admin,
+    actor: Actor,
     State(state): State<AppState>,
     request: Result<Query<IpDeallocTagged>, QueryRejection>,
 ) -> Result<Json<Vec<SupernetNode>>, ApiError> {
@@ -371,6 +381,7 @@ async fn dealloc_ips_tagged(
     let removed = state
         .store
         .dealloc_ips_tagged(
+            &actor,
             request.supernet.as_ref(),
             request.subnet.as_ref(),
             &request.tag,
@@ -387,7 +398,7 @@ async fn list_hosts(State(state): State<AppState>) -> Result<Json<Vec<SupernetNo
 }
 
 async fn alloc_host(
-    _: Admin,
+    actor: Actor,
     State(state): State<AppState>,
     request: Result<Json<HostAlloc>, JsonRejection>,
 ) -> Result<(StatusCode, Json<SupernetNode>), ApiError> {
@@ -398,7 +409,7 @@ async fn alloc_host(
         subnet: request.subnet,
         ip: request.ip,
     };
-    let added = state.store.alloc_host(host).await?;
+    let added = state.store.alloc_host(&actor, host).await?;
     let node = host_node(&added);
     Ok((
         StatusCode::CREATED,
@@ -407,16 +418,166 @@ async fn alloc_host(
 }
 
 async fn dealloc_host(
-    _: Admin,
+    actor: Actor,
     State(state): State<AppState>,
     name: Result<axum::extract::Path<Hostname>, PathRejection>,
 ) -> Result<Json<SupernetNode>, ApiError> {
     let name = path(name)?;
-    let removed = state.store.dealloc_host(&name).await?;
+    let removed = state.store.dealloc_host(&actor, &name).await?;
     let node = host_node(&removed);
     Ok(Json(
         ip_path(&state, &removed.host.supernet, &removed.host.subnet, node).await?,
     ))
+}
+
+/// A `--user`/`--group` (name or number), or `--everyone`, as stored.
+fn principal(users: &dyn Users, who: &WhoArg) -> Result<Principal, ApiError> {
+    let id = |value: &str, kind: &str, lookup: &dyn Fn(&str) -> Option<u32>| {
+        value
+            .parse::<u32>()
+            .ok()
+            .or_else(|| lookup(value))
+            .ok_or_else(|| ApiError::bad_request(format!("no {kind} named {value}")))
+    };
+    match (&who.user, &who.group, who.everyone) {
+        (Some(user), None, false) => Ok(Principal::User(id(user, "user", &|n| users.user_id(n))?)),
+        (None, Some(group), false) => Ok(Principal::Group(id(group, "group", &|n| {
+            users.group_id(n)
+        })?)),
+        (None, None, true) => Ok(Principal::Everyone),
+        _ => Err(ApiError::bad_request(
+            "name exactly one of user, group or everyone",
+        )),
+    }
+}
+
+/// A stored principal, with its name if the OS knows it.
+fn who(users: &dyn Users, principal: Principal) -> Who {
+    match principal {
+        Principal::User(id) => Who::User {
+            id,
+            name: users.user_name(id),
+        },
+        Principal::Group(id) => Who::Group {
+            id,
+            name: users.group_name(id),
+        },
+        Principal::Everyone => Who::Everyone,
+    }
+}
+
+fn grant_node(users: &dyn Users, scope: &Scope, grant: Grant) -> GrantNode {
+    GrantNode {
+        supernet: scope.supernet().cloned(),
+        subnet: scope.subnet().cloned(),
+        who: who(users, grant.who),
+        role: grant.role,
+    }
+}
+
+fn scope(supernet: Option<Name>, subnet: Option<Name>) -> Result<Scope, ApiError> {
+    Scope::of(supernet, subnet).map_err(ApiError::bad_request)
+}
+
+async fn list_grants(
+    State(state): State<AppState>,
+    request: Result<Query<GrantQuery>, QueryRejection>,
+) -> Result<Json<Vec<GrantNode>>, ApiError> {
+    let request = query(request)?;
+    let who = request.who();
+    let principal = if who == WhoArg::default() {
+        None
+    } else {
+        Some(principal(state.users.as_ref(), &who)?)
+    };
+    let at = scope(request.supernet, request.subnet)?;
+    let grants = state.store.grants(&at, principal).await?;
+    Ok(Json(
+        grants
+            .iter()
+            .map(|(at, grant)| grant_node(state.users.as_ref(), at, *grant))
+            .collect(),
+    ))
+}
+
+async fn add_grant(
+    actor: Actor,
+    State(state): State<AppState>,
+    request: Result<Json<GrantAdd>, JsonRejection>,
+) -> Result<(StatusCode, Json<GrantNode>), ApiError> {
+    let request = json_body(request)?;
+    let grant = Grant {
+        who: principal(state.users.as_ref(), &request.who)?,
+        role: request.role,
+    };
+    let at = scope(request.supernet, request.subnet)?;
+    let added = state.store.grant(&actor, at.clone(), grant).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(grant_node(state.users.as_ref(), &at, added)),
+    ))
+}
+
+async fn remove_grant(
+    actor: Actor,
+    State(state): State<AppState>,
+    request: Result<Query<GrantQuery>, QueryRejection>,
+) -> Result<Json<GrantNode>, ApiError> {
+    let request = query(request)?;
+    let principal = principal(state.users.as_ref(), &request.who())?;
+    let at = scope(request.supernet, request.subnet)?;
+    let removed = state.store.revoke(&actor, at.clone(), principal).await?;
+    Ok(Json(grant_node(state.users.as_ref(), &at, removed)))
+}
+
+async fn check_grants(
+    caller: Actor,
+    State(state): State<AppState>,
+    request: Result<Query<GrantCheckQuery>, QueryRejection>,
+) -> Result<Json<GrantCheck>, ApiError> {
+    let request = query(request)?;
+    let users = state.users.as_ref();
+    let actor = match &request.user {
+        None => caller,
+        Some(user) => {
+            let Principal::User(uid) = principal(
+                users,
+                &WhoArg {
+                    user: Some(user.clone()),
+                    ..WhoArg::default()
+                },
+            )?
+            else {
+                unreachable!("a user was named")
+            };
+            Actor {
+                uid,
+                gids: users.groups_of(uid),
+            }
+        }
+    };
+    let at = match (request.supernet, request.subnet) {
+        (None, None) => None,
+        (supernet, subnet) => Some(scope(supernet, subnet)?),
+    };
+    let scopes = state.store.effective(&actor, at.as_ref()).await?;
+    Ok(Json(GrantCheck {
+        user: who(users, Principal::User(actor.uid)),
+        root: actor.is_root(),
+        scopes: scopes
+            .into_iter()
+            .map(|e| EffectiveNode {
+                supernet: e.scope.supernet().cloned(),
+                subnet: e.scope.subnet().cloned(),
+                role: e.role,
+                from: e
+                    .from
+                    .iter()
+                    .map(|(at, grant)| grant_node(users, at, *grant))
+                    .collect(),
+            })
+            .collect(),
+    }))
 }
 
 /// The ip a host is on, with just that host under it.
@@ -463,6 +624,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::users::fake::FakeUsers;
 
     const ROOT: Peer = Peer {
         uid: 0,
@@ -511,6 +673,13 @@ mod tests {
             store: Arc::new(
                 Store::load(state_dir, Arc::new(crate::os::fake::RecordingOs::default())).unwrap(),
             ),
+            users: Arc::new(FakeUsers {
+                users: vec![
+                    (1000, "kalin", vec![1000, 984]),
+                    (4242, "stranger", vec![4242]),
+                ],
+                groups: vec![(984, "devs"), (1000, "kalin"), (4242, "stranger")],
+            }),
         };
         router(state).layer(MockConnectInfo(ConnInfo { peer: Some(peer) }))
     }
@@ -893,38 +1062,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supernet_alloc_needs_admin() {
+    async fn grants_by_name_let_users_change_things() {
         let dir = tempfile::tempdir().unwrap();
-        // Not root, and (unless the tests run as uid 4242) not the daemon's own user.
+        let root = || app(dir.path(), ROOT);
+        let kalin = || app(dir.path(), USER);
+        post_json(
+            root(),
+            "/supernets",
+            serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16" }),
+        )
+        .await;
+        let subnet =
+            serde_json::json!({ "supernet": "obd", "name": "a", "kind": "host", "size": 24 });
+        let (status, _) = post_json(kalin(), "/subnets", subnet.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // kalin is in devs (gid 984) only in the user database: the connection says gid 1000.
+        let (status, body) = post_json(
+            root(),
+            "/grants",
+            serde_json::json!({ "supernet": "obd", "group": "devs", "role": "manage" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(
+            body,
+            serde_json::json!({ "supernet": "obd", "who": { "kind": "group", "id": 984, "name": "devs" }, "role": "manage" })
+        );
+        let (status, _) = post_json(kalin(), "/subnets", subnet).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (_, body) = get_json(kalin(), "/grants/check?supernet=obd&subnet=a").await;
+        assert_eq!(
+            body["user"],
+            serde_json::json!({ "kind": "user", "id": 1000, "name": "kalin" })
+        );
+        assert_eq!(body["root"], false);
+        assert_eq!(body["scopes"][0]["role"], "manage");
+        assert_eq!(body["scopes"][0]["from"][0]["who"]["name"], "devs");
+        let (_, body) = get_json(kalin(), "/grants/check?user=stranger").await;
+        assert_eq!(body["scopes"], serde_json::json!([]));
+
+        let (_, body) = get_json(kalin(), "/grants?group=984").await;
+        assert_eq!(body.as_array().unwrap().len(), 1, "by name or number");
+        for bad in [
+            "/grants?user=nobody",
+            "/grants?user=kalin&group=devs",
+            "/grants?subnet=a",
+        ] {
+            let (status, _) = get_json(kalin(), bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+
+        let (status, _) = delete(kalin(), "/grants?supernet=obd&group=devs").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "manage can't remove grants");
+        let (status, body) = delete(root(), "/grants?supernet=obd&group=devs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["role"], "manage");
+        let (status, _) = delete(root(), "/grants?supernet=obd&group=devs").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn supernet_alloc_needs_root() {
+        let dir = tempfile::tempdir().unwrap();
         let stranger = Peer {
             uid: 4242,
             gid: 4242,
             pid: None,
         };
         let body = serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16" });
-        let (status, _) = post_json(app(dir.path(), stranger), "/supernets", body).await;
+        let (status, body) = post_json(app(dir.path(), stranger), "/supernets", body).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn admin_routes_reject_non_root() {
-        use crate::control::auth::Admin;
-        let app = |peer| {
-            Router::new()
-                .route("/admin", get(|_: Admin| async { Json("ok") }))
-                .layer(MockConnectInfo(ConnInfo { peer: Some(peer) }))
-        };
-        let stranger = Peer {
-            uid: 4242,
-            gid: 4242,
-            pid: None,
-        };
-        let (status, body) = get_json(app(stranger), "/admin").await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(body["error"], "uid 4242 isn't root; try again with sudo");
-
-        let (status, body) = get_json(app(ROOT), "/admin").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, "ok");
+        assert_eq!(
+            body["error"],
+            "uid 4242 isn't root, and creating a supernet needs root; try again with sudo"
+        );
     }
 }
