@@ -49,10 +49,13 @@ Recursive removes everything below, **hosts included**:
 | `supernet dealloc` | refused if it has subnets | removes its subnets, their ips and their hosts |
 | `subnet dealloc` | refused if it has ips | removes its ips and their hosts |
 | `ip dealloc` | refused if it has hosts | removes its hosts |
+| `ip dealloc --tag` | refused if any of them has hosts (then nothing is removed) | removes their hosts |
 | `host dealloc` | removes it | n/a |
 
 The routes are `DELETE /supernets/{supernet}`, `/subnets/{supernet}/{subnet}` and
-`/ips/{supernet}/{subnet}/{ip}` (Admin). Each returns everything it removed.
+`/ips/{supernet}/{subnet}/{ip}`, plus `DELETE /ips?tag=…[&supernet=…[&subnet=…]]` for every ip
+with a tag (Admin). Each returns everything it removed. Removing by tag is all or nothing, and a tag
+that matches nothing is a 404, like any other unknown name.
 
 The tree is supernet → subnet → ip. `Ip` (nested in its subnet) is a name plus an address that
 **obeliskd always picks**: the lowest free one (`model/ip.rs`):
@@ -72,7 +75,8 @@ the store swaps after every change, so queries never wait on the store's lock.
 
 Ip names are unique within their subnet. An ip may carry **one optional `tag`** (`ip alloc --tag
 pr-42`, name rules): a group label, a sort of "sub-sub-net", so a set of ips can be found together
-(`ip list --tag pr-42`), and later removed together. The tag doesn't affect which address is picked.
+(`ip list --tag pr-42`) and removed together (`ip dealloc --tag pr-42`). A tag is global: the
+same tag in different subnets or supernets is one group, and `--supernet`/`--subnet` narrow it. The tag doesn't affect which address is picked.
 The `--tag` filter drops branches with no matching ips, rather than showing them as dash rows. (See the dealloc table above for `--recursive`.)
 
 ## The OS side (`code/obeliskd/src/os/`)

@@ -5,8 +5,8 @@ use std::process::ExitCode;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
 use obeliskd::control::api::{
-    HostAlloc, IpAlloc, IpDealloc, IpQuery, SubnetAlloc, SubnetDealloc, SubnetQuery, SupernetAlloc,
-    SupernetDealloc,
+    HostAlloc, IpAlloc, IpDealloc, IpDeallocTagged, IpQuery, SubnetAlloc, SubnetDealloc,
+    SubnetQuery, SupernetAlloc, SupernetDealloc,
 };
 use obeliskd::control::client::ControlClient;
 use obeliskd::model::{Hostname, Name, SubnetKind};
@@ -241,18 +241,22 @@ enum IpCommand {
         #[command(flatten)]
         output: Output,
     },
-    /// Free an ip; its address can be handed out again (root only)
+    /// Free an ip, or every ip with a tag; their addresses can be handed out again (root only)
+    #[command(group = clap::ArgGroup::new("which").args(["ip", "tag"]).required(true))]
     Dealloc {
-        /// The supernet the subnet is in
+        /// The supernet the subnet is in (with --tag: only ips in this supernet)
         #[arg(long)]
-        supernet: Name,
-        /// The subnet it's in
+        supernet: Option<Name>,
+        /// The subnet it's in (with --tag: only ips in this subnet; needs --supernet)
+        #[arg(long, requires = "supernet")]
+        subnet: Option<Name>,
+        /// The ip to free (needs --supernet and --subnet)
+        #[arg(long, requires_all = ["supernet", "subnet"])]
+        ip: Option<Name>,
+        /// Free every ip with this tag, e.g. `pr-42`, all at once
         #[arg(long)]
-        subnet: Name,
-        /// The ip to free
-        #[arg(long)]
-        ip: Name,
-        /// Also remove the hosts pointing at it (otherwise it must have none)
+        tag: Option<Name>,
+        /// Also remove the hosts pointing at them (otherwise none may have any)
         #[arg(long)]
         recursive: bool,
         #[command(flatten)]
@@ -421,6 +425,18 @@ async fn command_ip_dealloc(
         .dealloc_ip(supernet, subnet, ip, &IpDealloc { recursive })
         .await?;
     output.print(&removed, pretty::ip_deallocated);
+    Ok(())
+}
+
+async fn command_ip_dealloc_tagged(
+    socket: &Path,
+    request: &IpDeallocTagged,
+    output: &Output,
+) -> Result<(), ObeliskdError> {
+    let removed = ControlClient::new(socket)?
+        .dealloc_ips_tagged(request)
+        .await?;
+    output.print(&removed, |r| pretty::ips_deallocated(&request.tag, r));
     Ok(())
 }
 
@@ -599,9 +615,24 @@ async fn run_ip(socket: &Path, command: IpCommand) -> Result<(), ObeliskdError> 
             supernet,
             subnet,
             ip,
+            tag,
             recursive,
             output,
-        } => command_ip_dealloc(socket, &supernet, &subnet, &ip, recursive, &output).await,
+        } => match (supernet, subnet, ip, tag) {
+            (Some(supernet), Some(subnet), Some(ip), _) => {
+                command_ip_dealloc(socket, &supernet, &subnet, &ip, recursive, &output).await
+            }
+            (supernet, subnet, _, Some(tag)) => {
+                let request = IpDeallocTagged {
+                    tag,
+                    supernet,
+                    subnet,
+                    recursive,
+                };
+                command_ip_dealloc_tagged(socket, &request, &output).await
+            }
+            _ => unreachable!("clap requires --ip (with --supernet and --subnet) or --tag"),
+        },
     }
 }
 

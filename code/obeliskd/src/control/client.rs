@@ -6,8 +6,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::api::{
-    ErrorBody, Health, HostAlloc, IpAlloc, IpDealloc, IpQuery, SubnetAlloc, SubnetDealloc,
-    SubnetQuery, SupernetAlloc, SupernetDealloc, SupernetNode,
+    ErrorBody, Health, HostAlloc, IpAlloc, IpDealloc, IpDeallocTagged, IpQuery, SubnetAlloc,
+    SubnetDealloc, SubnetQuery, SupernetAlloc, SupernetDealloc, SupernetNode,
 };
 use crate::model::{Hostname, Name};
 use crate::{ObeliskdError, Platform, PlatformImpl};
@@ -139,6 +139,19 @@ impl ControlClient {
     ) -> Result<SupernetNode, ObeliskdError> {
         let path = format!("/ips/{supernet}/{subnet}/{ip}");
         self.send(self.http.delete(url(&path)).query(request)).await
+    }
+
+    /// `DELETE /ips?tag=…`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or refuses (no ips with the tag, hosts still on them).
+    pub async fn dealloc_ips_tagged(
+        &self,
+        request: &IpDeallocTagged,
+    ) -> Result<Vec<SupernetNode>, ObeliskdError> {
+        self.send(self.http.delete(url("/ips")).query(request))
+            .await
     }
 
     /// `GET /hosts`

@@ -59,6 +59,37 @@ impl Config {
         })
     }
 
+    /// The whole tree, or just one supernet (and within it, one subnet); see [`Store::tree`].
+    fn tree(
+        &self,
+        supernet: Option<&Name>,
+        subnet: Option<&Name>,
+    ) -> Result<Vec<Supernet>, ObeliskdError> {
+        let Some(supernet) = supernet else {
+            if subnet.is_some() {
+                return Err(ObeliskdError::Invalid(
+                    "--subnet needs --supernet (subnet names are per supernet)".to_string(),
+                ));
+            }
+            return Ok(self.supernets.clone());
+        };
+        let mut found = self
+            .supernets
+            .iter()
+            .find(|s| &s.name == supernet)
+            .cloned()
+            .ok_or_else(|| ObeliskdError::NotFound(format!("no supernet {supernet}")))?;
+        if let Some(subnet) = subnet {
+            found.subnets.retain(|s| &s.name == subnet);
+            if found.subnets.is_empty() {
+                return Err(ObeliskdError::NotFound(format!(
+                    "no subnet {supernet}/{subnet}"
+                )));
+            }
+        }
+        Ok(vec![found])
+    }
+
     /// What DNS answers with.
     fn host_table(&self) -> HostTable {
         self.hosts()
@@ -183,30 +214,7 @@ impl Store {
         supernet: Option<&Name>,
         subnet: Option<&Name>,
     ) -> Result<Vec<Supernet>, ObeliskdError> {
-        let config = self.config.lock().await;
-        let Some(supernet) = supernet else {
-            if subnet.is_some() {
-                return Err(ObeliskdError::Invalid(
-                    "--subnet needs --supernet (subnet names are per supernet)".to_string(),
-                ));
-            }
-            return Ok(config.supernets.clone());
-        };
-        let mut found = config
-            .supernets
-            .iter()
-            .find(|s| &s.name == supernet)
-            .cloned()
-            .ok_or_else(|| ObeliskdError::NotFound(format!("no supernet {supernet}")))?;
-        if let Some(subnet) = subnet {
-            found.subnets.retain(|s| &s.name == subnet);
-            if found.subnets.is_empty() {
-                return Err(ObeliskdError::NotFound(format!(
-                    "no subnet {supernet}/{subnet}"
-                )));
-            }
-        }
-        Ok(vec![found])
+        self.config.lock().await.tree(supernet, subnet)
     }
 
     /// One supernet, as it is now.
@@ -646,6 +654,83 @@ impl Store {
             kind,
             ip: removed,
         })
+    }
+
+    /// Frees every ip tagged `tag`, optionally only in one supernet (and within it, one subnet),
+    /// and saves, all at once. With `recursive`, the hosts pointing at them go too; without, none
+    /// may have any (then nothing is removed). What was removed is returned as a tree, holding
+    /// only the branches that had any.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::NotFound`] if a named supernet or subnet doesn't exist, or no ip there has
+    /// the tag; [`ObeliskdError::Invalid`] for a subnet without its supernet;
+    /// [`ObeliskdError::Conflict`] if any of them has hosts and `recursive` is off; or an OS/save
+    /// failure.
+    pub async fn dealloc_ips_tagged(
+        &self,
+        supernet: Option<&Name>,
+        subnet: Option<&Name>,
+        tag: &Name,
+        recursive: bool,
+    ) -> Result<Vec<Supernet>, ObeliskdError> {
+        let mut config = self.config.lock().await;
+        // Checks the names, and gives the tree to pick from.
+        let mut removed = config.tree(supernet, subnet)?;
+        let tagged = |ip: &Ip| ip.tag.as_ref() == Some(tag);
+        for parent in &mut removed {
+            for sub in &mut parent.subnets {
+                sub.ips.retain(|ip| tagged(ip));
+            }
+            parent.subnets.retain(|sub| !sub.ips.is_empty());
+        }
+        removed.retain(|parent| !parent.subnets.is_empty());
+        if removed.is_empty() {
+            let place = match (supernet, subnet) {
+                (Some(supernet), Some(subnet)) => format!(" in subnet {supernet}/{subnet}"),
+                (Some(supernet), None) => format!(" in supernet {supernet}"),
+                _ => String::new(),
+            };
+            return Err(ObeliskdError::NotFound(format!(
+                "no ips tagged {tag}{place}"
+            )));
+        }
+        let goes = |s: &Name, n: &Name, i: &Name| {
+            removed.iter().any(|parent| {
+                &parent.name == s
+                    && parent
+                        .subnets
+                        .iter()
+                        .any(|sub| &sub.name == n && sub.ips.iter().any(|ip| &ip.name == i))
+            })
+        };
+        if !recursive {
+            config.refuse_if_hosts(&format!("an ip tagged {tag}"), |h| {
+                goes(&h.supernet, &h.subnet, &h.ip)
+            })?;
+        }
+
+        let mut next = config.clone();
+        for parent in &mut next.supernets {
+            for sub in &mut parent.subnets {
+                let (gone, kept) = std::mem::take(&mut sub.ips)
+                    .into_iter()
+                    .partition(|ip| goes(&parent.name, &sub.name, &ip.name));
+                sub.ips = kept;
+                for ip in &gone {
+                    self.os.remove_ip(sub, ip)?;
+                }
+            }
+        }
+        files::persist(&self.dir, &config, &next)?;
+        self.commit(&mut config, next);
+        let ips = removed.iter().flat_map(|s| &s.subnets).flat_map(|s| &s.ips);
+        tracing::info!(
+            ips = ips.clone().count(),
+            hosts = ips.map(|i| i.hosts.len()).sum::<usize>(),
+            "deallocated ips tagged {tag}"
+        );
+        Ok(removed)
     }
 }
 
@@ -1330,6 +1415,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dealloc_by_tag_takes_every_tagged_ip_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, os) = load_with(dir.path());
+        let (obd, other) = (name("obd"), name("other"));
+        let tag = name("pr-42");
+        for (supernet, cidr) in [(&obd, "10.57.0.0/16"), (&other, "10.58.0.0/16")] {
+            store
+                .alloc_supernet(supernet.clone(), cidr.parse().unwrap())
+                .await
+                .unwrap();
+            for subnet in ["a", "b"] {
+                store
+                    .alloc_subnet(supernet, name(subnet), SubnetKind::Host, 24, None)
+                    .await
+                    .unwrap();
+                store
+                    .alloc_ip(supernet, &name(subnet), name("db"), Some(tag.clone()))
+                    .await
+                    .unwrap();
+                store
+                    .alloc_ip(supernet, &name(subnet), name("web"), None)
+                    .await
+                    .unwrap();
+            }
+        }
+        let paths = |tree: &[Supernet]| -> Vec<String> {
+            tree.iter()
+                .flat_map(|s| {
+                    s.subnets.iter().flat_map(move |sub| {
+                        sub.ips
+                            .iter()
+                            .map(move |ip| format!("{}/{}/{}", s.name, sub.name, ip.name))
+                    })
+                })
+                .collect()
+        };
+
+        // Narrowed to one subnet, then one supernet, then everywhere left.
+        let removed = store
+            .dealloc_ips_tagged(Some(&obd), Some(&name("a")), &tag, false)
+            .await
+            .unwrap();
+        assert_eq!(paths(&removed), ["obd/a/db"]);
+        assert_eq!(os.calls().last().unwrap(), "remove ip a/db 10.57.0.1");
+        let removed = store
+            .dealloc_ips_tagged(Some(&obd), None, &tag, false)
+            .await
+            .unwrap();
+        assert_eq!(paths(&removed), ["obd/b/db"]);
+        let removed = store
+            .dealloc_ips_tagged(None, None, &tag, false)
+            .await
+            .unwrap();
+        assert_eq!(paths(&removed), ["other/a/db", "other/b/db"]);
+
+        // Nothing tagged is left; the untagged ips stayed, also on disk.
+        let none = store.dealloc_ips_tagged(None, None, &tag, false).await;
+        assert!(matches!(none, Err(ObeliskdError::NotFound(m)) if m == "no ips tagged pr-42"));
+        let left = load(dir.path()).ips(None, None).await.unwrap();
+        assert_eq!(left.len(), 4);
+        assert!(left.iter().all(|i| i.ip.name == name("web")));
+    }
+
+    #[tokio::test]
+    async fn dealloc_by_tag_needs_real_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = load(dir.path());
+        with_ip(&store).await;
+        let tag = name("pr-42");
+        assert!(matches!(
+            store
+                .dealloc_ips_tagged(None, Some(&name("host")), &tag, false)
+                .await,
+            Err(ObeliskdError::Invalid(_))
+        ));
+        assert!(matches!(
+            store
+                .dealloc_ips_tagged(Some(&name("x")), None, &tag, false)
+                .await,
+            Err(ObeliskdError::NotFound(_))
+        ));
+        let elsewhere = store
+            .dealloc_ips_tagged(
+                Some(&name("obd")),
+                Some(&name("host")),
+                &name("pr-7"),
+                false,
+            )
+            .await;
+        assert!(
+            matches!(&elsewhere, Err(ObeliskdError::NotFound(m)) if m == "no ips tagged pr-7 in subnet obd/host"),
+            "{elsewhere:?}"
+        );
+        assert_eq!(store.ips(None, None).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn subnets_with_ips_need_recursive() {
         let dir = tempfile::tempdir().unwrap();
         let (store, os) = load_with(dir.path());
@@ -1389,7 +1571,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .alloc_ip(&obd, &name("host"), name("web"), None)
+            .alloc_ip(&obd, &name("host"), name("web"), Some(name("pr-42")))
             .await
             .unwrap();
     }
@@ -1467,7 +1649,7 @@ mod tests {
     async fn recursive_deallocs_take_hosts_along() {
         type Dealloc =
             fn(&Store) -> std::pin::Pin<Box<dyn Future<Output = Result<(), ObeliskdError>> + '_>>;
-        let levels: [(&str, Dealloc, Dealloc); 3] = [
+        let levels: [(&str, Dealloc, Dealloc); 4] = [
             (
                 "ip",
                 |s| {
@@ -1497,6 +1679,23 @@ mod tests {
                 |s| {
                     Box::pin(async {
                         s.dealloc_subnet(&name("obd"), &name("host"), true)
+                            .await
+                            .map(|_| ())
+                    })
+                },
+            ),
+            (
+                "tag",
+                |s| {
+                    Box::pin(async {
+                        s.dealloc_ips_tagged(None, None, &name("pr-42"), false)
+                            .await
+                            .map(|_| ())
+                    })
+                },
+                |s| {
+                    Box::pin(async {
+                        s.dealloc_ips_tagged(None, None, &name("pr-42"), true)
                             .await
                             .map(|_| ())
                     })

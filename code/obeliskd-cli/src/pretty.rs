@@ -8,7 +8,7 @@ use std::fmt::Write;
 
 use ipnet::Ipv4Net;
 use obeliskd::control::api::{Health, IpNode, SubnetNode, SupernetNode};
-use obeliskd::model::SubnetKind;
+use obeliskd::model::{Name, SubnetKind};
 
 pub fn health(health: &Health) -> String {
     let caller = &health.caller;
@@ -229,6 +229,30 @@ pub fn ip_deallocated(supernet: &SupernetNode) -> String {
     out
 }
 
+pub fn ips_deallocated(tag: &Name, supernets: &[SupernetNode]) -> String {
+    let mut lines = String::new();
+    let mut count = 0;
+    for supernet in supernets {
+        for subnet in supernet.subnets.as_deref().unwrap_or_default() {
+            for ip in subnet.ips.as_deref().unwrap_or_default() {
+                count += 1;
+                let _ = writeln!(
+                    lines,
+                    "  ip {}/{}/{} ({})",
+                    supernet.name, subnet.name, ip.name, ip.address
+                );
+                for host in ip.hosts.as_deref().unwrap_or_default() {
+                    let _ = writeln!(lines, "    and its host {host}");
+                }
+            }
+        }
+    }
+    format!(
+        "deallocated {count} ip{} tagged {tag}\n{lines}",
+        if count == 1 { "" } else { "s" }
+    )
+}
+
 /// "  and its host …" for each host that went along with `ip`.
 fn write_hosts(out: &mut String, ip: &IpNode) {
     for host in ip.hosts.as_deref().unwrap_or_default() {
@@ -366,7 +390,7 @@ fn table<const N: usize>(headers: &[&str; N], rows: &[[String; N]], groups: &[us
 
 #[cfg(test)]
 mod tests {
-    use obeliskd::model::{Hostname, Name};
+    use obeliskd::model::Hostname;
 
     use super::*;
 
@@ -436,6 +460,24 @@ mod tests {
         assert_eq!(
             subnet_deallocated(&removed),
             "deallocated host subnet ex1/1 (10.57.0.0/24)\n  and its ip ex1/1/db-2 (10.57.0.2)\n  and its host a.obd.internal\n"
+        );
+    }
+
+    #[test]
+    fn deallocs_by_tag_list_each_ip_and_its_hosts() {
+        let removed = vec![SupernetNode {
+            subnets: Some(vec![SubnetNode {
+                ips: Some(vec![
+                    ip("db-2", "10.57.0.2", &["a.obd.internal"]),
+                    ip("db-4", "10.57.0.3", &[]),
+                ]),
+                ..tree()[0].subnets.as_ref().unwrap()[0].clone()
+            }]),
+            ..tree()[0].clone()
+        }];
+        assert_eq!(
+            ips_deallocated(&name("pr-42"), &removed),
+            "deallocated 2 ips tagged pr-42\n  ip ex1/1/db-2 (10.57.0.2)\n    and its host a.obd.internal\n  ip ex1/1/db-4 (10.57.0.3)\n"
         );
     }
 

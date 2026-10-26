@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use super::Peer;
 use super::api::{
-    DaemonInfo, Depth, ErrorBody, Health, HostAlloc, IpAlloc, IpDealloc, IpNode, IpQuery,
-    SubnetAlloc, SubnetDealloc, SubnetNode, SubnetQuery, SupernetAlloc, SupernetDealloc,
+    DaemonInfo, Depth, ErrorBody, Health, HostAlloc, IpAlloc, IpDealloc, IpDeallocTagged, IpNode,
+    IpQuery, SubnetAlloc, SubnetDealloc, SubnetNode, SubnetQuery, SupernetAlloc, SupernetDealloc,
     SupernetNode,
 };
 use super::auth::Admin;
@@ -110,7 +110,10 @@ pub fn router(state: AppState) -> Router {
         .route("/supernets/{supernet}", delete(dealloc_supernet))
         .route("/subnets", get(list_subnets).post(alloc_subnet))
         .route("/subnets/{supernet}/{subnet}", delete(dealloc_subnet))
-        .route("/ips", get(list_ips).post(alloc_ip))
+        .route(
+            "/ips",
+            get(list_ips).post(alloc_ip).delete(dealloc_ips_tagged),
+        )
         .route("/ips/{supernet}/{subnet}/{ip}", delete(dealloc_ip))
         .route("/hosts", get(list_hosts).post(alloc_host))
         .route("/hosts/{host}", delete(dealloc_host))
@@ -357,6 +360,25 @@ async fn dealloc_ip(
     // With any hosts it took along.
     let node = IpNode::of(&removed.ip, Depth::Hosts);
     Ok(Json(ip_path(&state, &supernet, &subnet, node).await?))
+}
+
+async fn dealloc_ips_tagged(
+    _: Admin,
+    State(state): State<AppState>,
+    request: Result<Query<IpDeallocTagged>, QueryRejection>,
+) -> Result<Json<Vec<SupernetNode>>, ApiError> {
+    let request = query(request)?;
+    let removed = state
+        .store
+        .dealloc_ips_tagged(
+            request.supernet.as_ref(),
+            request.subnet.as_ref(),
+            &request.tag,
+            request.recursive,
+        )
+        .await?;
+    // Just the ips that went, with any hosts they took along.
+    Ok(Json(nodes(&removed, Depth::Hosts)))
 }
 
 async fn list_hosts(State(state): State<AppState>) -> Result<Json<Vec<SupernetNode>>, ApiError> {
@@ -824,6 +846,50 @@ mod tests {
         assert_eq!(names, ["db", "cache"], "only the tag's ips, across subnets");
         let (_, body) = get_json(root(), "/ips?tag=nothing").await;
         assert_eq!(body, serde_json::json!([]), "no branches without matches");
+    }
+
+    #[tokio::test]
+    async fn ips_dealloc_by_tag_returns_what_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = || app(dir.path(), ROOT);
+        post_json(
+            root(),
+            "/supernets",
+            serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16" }),
+        )
+        .await;
+        post_json(
+            root(),
+            "/subnets",
+            serde_json::json!({ "supernet": "obd", "name": "a", "kind": "host", "size": 24 }),
+        )
+        .await;
+        for (name, tag) in [("db", Some("pr-42")), ("web", None)] {
+            let mut body = serde_json::json!({ "supernet": "obd", "subnet": "a", "name": name });
+            if let Some(tag) = tag {
+                body["tag"] = tag.into();
+            }
+            post_json(root(), "/ips", body).await;
+        }
+        post_json(
+            root(),
+            "/hosts",
+            serde_json::json!({ "name": "db.obd.internal", "supernet": "obd", "subnet": "a", "ip": "db" }),
+        )
+        .await;
+
+        let (status, body) = delete(root(), "/ips?tag=pr-42").await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let (status, body) = delete(root(), "/ips?tag=pr-42&recursive=true").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let ip = &body[0]["subnets"][0]["ips"][0];
+        assert_eq!(ip["name"], "db");
+        assert_eq!(ip["hosts"], serde_json::json!(["db.obd.internal"]));
+        assert_eq!(body[0]["subnets"][0]["ips"].as_array().unwrap().len(), 1);
+        let (status, _) = delete(root(), "/ips?tag=pr-42").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = delete(root(), "/ips").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "the tag is required");
     }
 
     #[tokio::test]

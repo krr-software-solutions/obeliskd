@@ -79,6 +79,20 @@ pub struct IpDealloc {
     pub recursive: bool,
 }
 
+/// `DELETE /ips?tag=…&supernet=…&subnet=…&recursive=…`: every ip with the tag, optionally only in
+/// one supernet (and within it, one subnet; `subnet` needs `supernet`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpDeallocTagged {
+    pub tag: Name,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supernet: Option<Name>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet: Option<Name>,
+    /// Also remove the hosts pointing at them (otherwise none may have any).
+    #[serde(default)]
+    pub recursive: bool,
+}
+
 /// `POST /ips`: obeliskd picks the lowest free address.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IpAlloc {
