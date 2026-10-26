@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::api::{ErrorBody, Health, SubnetAlloc, SubnetEntry, SubnetQuery, SupernetAlloc};
-use crate::model::Supernet;
+use super::api::{
+    ErrorBody, Health, SubnetAlloc, SubnetEntry, SubnetQuery, SupernetAlloc, SupernetDealloc,
+};
+use crate::model::{Name, Supernet};
 use crate::{ObeliskdError, Platform, PlatformImpl};
 
 /// Talks to the daemon over its control socket.
@@ -69,6 +71,38 @@ impl ControlClient {
     /// If the daemon can't be reached, or refuses (e.g. an overlap, or no free range).
     pub async fn alloc_subnet(&self, request: &SubnetAlloc) -> Result<SubnetEntry, ObeliskdError> {
         self.post("/subnets", request).await
+    }
+
+    /// `DELETE /supernets/{supernet}`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or refuses (unknown, or still has subnets without
+    /// `recursive`).
+    pub async fn dealloc_supernet(
+        &self,
+        supernet: &Name,
+        request: &SupernetDealloc,
+    ) -> Result<Supernet, ObeliskdError> {
+        let path = format!("/supernets/{supernet}");
+        self.send(self.http.delete(url(&path)).query(request)).await
+    }
+
+    /// `DELETE /subnets/{supernet}/{subnet}`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or refuses (unknown supernet or subnet).
+    pub async fn dealloc_subnet(
+        &self,
+        supernet: &Name,
+        subnet: &Name,
+    ) -> Result<SubnetEntry, ObeliskdError> {
+        self.send(
+            self.http
+                .delete(url(&format!("/subnets/{supernet}/{subnet}"))),
+        )
+        .await
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ObeliskdError> {

@@ -111,6 +111,34 @@ pub fn subnet_allocated(entry: &SubnetEntry) -> String {
     )
 }
 
+pub fn supernet_deallocated(supernet: &Supernet) -> String {
+    let mut out = format!(
+        "deallocated supernet {} ({})\n",
+        supernet.name, supernet.cidr
+    );
+    for subnet in &supernet.subnets {
+        let _ = writeln!(
+            out,
+            "  and its {} subnet {}/{} ({})",
+            kind(subnet.kind),
+            supernet.name,
+            subnet.name,
+            subnet.cidr
+        );
+    }
+    out
+}
+
+pub fn subnet_deallocated(entry: &SubnetEntry) -> String {
+    format!(
+        "deallocated {} subnet {}/{} ({})\n",
+        kind(entry.subnet.kind),
+        entry.supernet,
+        entry.subnet.name,
+        entry.subnet.cidr
+    )
+}
+
 fn kind(kind: SubnetKind) -> &'static str {
     match kind {
         SubnetKind::Host => "host",

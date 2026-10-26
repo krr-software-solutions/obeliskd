@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
-use obeliskd::control::api::{SubnetAlloc, SubnetQuery, SupernetAlloc};
+use obeliskd::control::api::{SubnetAlloc, SubnetQuery, SupernetAlloc, SupernetDealloc};
 use obeliskd::control::client::ControlClient;
 use obeliskd::model::{Name, SubnetKind};
 use obeliskd::{ObeliskdError, Platform, PlatformImpl};
@@ -98,6 +98,17 @@ enum SupernetCommand {
         #[command(flatten)]
         output: Output,
     },
+    /// Remove a supernet (root only)
+    Dealloc {
+        /// The supernet to remove
+        #[arg(long)]
+        supernet: Name,
+        /// Also remove all its subnets (otherwise it must have none left)
+        #[arg(long)]
+        recursive: bool,
+        #[command(flatten)]
+        output: Output,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -128,6 +139,17 @@ enum SubnetCommand {
         /// subnet, as a prefix length (e.g. `26` in a /24: Docker gets .0–.63)
         #[arg(long, value_name = "PREFIX-LENGTH", required_if_eq("kind", "docker"))]
         reserve_size: Option<u8>,
+        #[command(flatten)]
+        output: Output,
+    },
+    /// Remove a subnet from its supernet (root only)
+    Dealloc {
+        /// The supernet it's in
+        #[arg(long)]
+        supernet: Name,
+        /// The subnet to remove
+        #[arg(long)]
+        subnet: Name,
         #[command(flatten)]
         output: Output,
     },
@@ -235,6 +257,32 @@ async fn command_subnet_alloc(
     Ok(())
 }
 
+async fn command_supernet_dealloc(
+    socket: &Path,
+    supernet: &Name,
+    recursive: bool,
+    output: &Output,
+) -> Result<(), ObeliskdError> {
+    let removed = ControlClient::new(socket)?
+        .dealloc_supernet(supernet, &SupernetDealloc { recursive })
+        .await?;
+    output.print(&removed, pretty::supernet_deallocated);
+    Ok(())
+}
+
+async fn command_subnet_dealloc(
+    socket: &Path,
+    supernet: &Name,
+    subnet: &Name,
+    output: &Output,
+) -> Result<(), ObeliskdError> {
+    let removed = ControlClient::new(socket)?
+        .dealloc_subnet(supernet, subnet)
+        .await?;
+    output.print(&removed, pretty::subnet_deallocated);
+    Ok(())
+}
+
 fn command_completions(shell: clap_complete::Shell) {
     let mut cmd = command();
     let name = cmd.get_name().to_string();
@@ -293,6 +341,11 @@ async fn main_impl() -> Result<(), ObeliskdError> {
                 cidr,
                 output,
             } => command_supernet_alloc(&socket, supernet, cidr, &output).await,
+            SupernetCommand::Dealloc {
+                supernet,
+                recursive,
+                output,
+            } => command_supernet_dealloc(&socket, &supernet, recursive, &output).await,
         },
         Command::Subnet { command } => match command {
             SubnetCommand::List { supernet, output } => {
@@ -315,6 +368,11 @@ async fn main_impl() -> Result<(), ObeliskdError> {
                 };
                 command_subnet_alloc(&socket, request, &output).await
             }
+            SubnetCommand::Dealloc {
+                supernet,
+                subnet,
+                output,
+            } => command_subnet_dealloc(&socket, &supernet, &subnet, &output).await,
         },
         Command::Completions { shell } => {
             command_completions(shell);

@@ -33,6 +33,10 @@ socket, and serves both until the shutdown signal.
 - `state.rs`: `Store`, which holds `config.toml` loaded in memory behind a mutex. Every change is
   validated, saved atomically, and only then made visible.
 
+Deallocating a supernet that still has subnets is refused (409) unless `--recursive`
+(`?recursive=true`), which removes its subnets with it; the response includes them. Dealloc routes are `DELETE /supernets/{supernet}` and
+`DELETE /subnets/{supernet}/{subnet}` (Admin), and they return what was removed.
+
 The tree is supernet → subnet → ip; supernets and subnets exist so far, as bookkeeping. Making
 them real on the OS (a Linux `local` route for host subnets, `docker network create` for docker
 ones) comes next.

@@ -201,6 +201,69 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Removes a supernet, and saves. With `recursive`, its subnets go with it; without, it must
+    /// have none. The removed supernet (with any subnets it took along) is returned.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::NotFound`] if it doesn't exist; [`ObeliskdError::Conflict`] if it still has
+    /// subnets and `recursive` is off; or a failure to save (then nothing changes).
+    pub async fn dealloc_supernet(
+        &self,
+        name: &Name,
+        recursive: bool,
+    ) -> Result<Supernet, ObeliskdError> {
+        let mut config = self.config.lock().await;
+        let mut next = config.clone();
+        let index = next
+            .supernets
+            .iter()
+            .position(|s| &s.name == name)
+            .ok_or_else(|| ObeliskdError::NotFound(format!("no supernet {name}")))?;
+        let count = next.supernets[index].subnets.len();
+        if count > 0 && !recursive {
+            return Err(ObeliskdError::Conflict(format!(
+                "supernet {name} still has {count} subnet{}; dealloc them first, or use --recursive",
+                if count == 1 { "" } else { "s" }
+            )));
+        }
+        let removed = next.supernets.remove(index);
+        save(&self.dir, &next)?;
+        *config = next;
+        Ok(removed)
+    }
+
+    /// Removes a subnet from its supernet, and saves.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::NotFound`] if the supernet or subnet doesn't exist; or a failure to save
+    /// (then nothing changes).
+    pub async fn dealloc_subnet(
+        &self,
+        supernet: &Name,
+        name: &Name,
+    ) -> Result<Subnet, ObeliskdError> {
+        let mut config = self.config.lock().await;
+        let mut next = config.clone();
+        let parent = next
+            .supernets
+            .iter_mut()
+            .find(|s| &s.name == supernet)
+            .ok_or_else(|| ObeliskdError::NotFound(format!("no supernet {supernet}")))?;
+        let index = parent
+            .subnets
+            .iter()
+            .position(|s| &s.name == name)
+            .ok_or_else(|| ObeliskdError::NotFound(format!("no subnet {supernet}/{name}")))?;
+        let removed = parent.subnets.remove(index);
+        save(&self.dir, &next)?;
+        *config = next;
+        Ok(removed)
+    }
+}
+
 /// Writes `config` to `dir/config.toml` atomically.
 fn save(dir: &Path, config: &Config) -> Result<(), ObeliskdError> {
     let path = dir.join(CONFIG_FILE);
@@ -385,6 +448,87 @@ mod tests {
         let store = Store::load(dir.path()).unwrap();
         let (_, subnet) = &store.subnets(None).await.unwrap()[0];
         assert_eq!(subnet.docker_gateway, Some("10.57.16.1".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn dealloc_frees_names_and_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        let obd = name("obd");
+        store
+            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .await
+            .unwrap();
+        let first = store
+            .alloc_subnet(&obd, name("a"), SubnetKind::Host, 24, None)
+            .await
+            .unwrap();
+
+        // Not empty: refused, and nothing changes.
+        let busy = store.dealloc_supernet(&obd, false).await;
+        assert!(
+            matches!(busy, Err(ObeliskdError::Conflict(m)) if m.contains("still has 1 subnet;"))
+        );
+
+        let removed = store.dealloc_subnet(&obd, &name("a")).await.unwrap();
+        assert_eq!(removed, first);
+        // The range is free again: the next /24 lands in the same place.
+        let again = store
+            .alloc_subnet(&obd, name("b"), SubnetKind::Host, 24, None)
+            .await
+            .unwrap();
+        assert_eq!(again.cidr, first.cidr);
+        store.dealloc_subnet(&obd, &name("b")).await.unwrap();
+
+        store.dealloc_supernet(&obd, false).await.unwrap();
+        let reloaded = Store::load(dir.path()).unwrap();
+        assert_eq!(reloaded.supernets().await, Vec::new(), "persisted");
+    }
+
+    #[tokio::test]
+    async fn recursive_dealloc_takes_the_subnets_along() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        let obd = name("obd");
+        store
+            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .await
+            .unwrap();
+        for n in ["a", "b"] {
+            store
+                .alloc_subnet(&obd, name(n), SubnetKind::Host, 24, None)
+                .await
+                .unwrap();
+        }
+        let removed = store.dealloc_supernet(&obd, true).await.unwrap();
+        assert_eq!(removed.subnets.len(), 2);
+        assert_eq!(store.subnets(None).await.unwrap(), Vec::new());
+        assert_eq!(
+            Store::load(dir.path()).unwrap().supernets().await,
+            Vec::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn dealloc_unknown_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        assert!(matches!(
+            store.dealloc_supernet(&name("nope"), false).await,
+            Err(ObeliskdError::NotFound(_))
+        ));
+        store
+            .alloc_supernet(name("obd"), "10.57.0.0/16".parse().unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.dealloc_subnet(&name("nope"), &name("a")).await,
+            Err(ObeliskdError::NotFound(_))
+        ));
+        assert!(matches!(
+            store.dealloc_subnet(&name("obd"), &name("a")).await,
+            Err(ObeliskdError::NotFound(_))
+        ));
     }
 
     #[test]

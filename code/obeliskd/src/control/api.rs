@@ -61,6 +61,14 @@ pub struct SubnetQuery {
     pub supernet: Option<Name>,
 }
 
+/// `DELETE /supernets/{supernet}?recursive=…`
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupernetDealloc {
+    /// Also remove its subnets (otherwise it must have none).
+    #[serde(default)]
+    pub recursive: bool,
+}
+
 /// The body of every non-2xx response.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {

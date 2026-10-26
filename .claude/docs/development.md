@@ -9,6 +9,7 @@ cargo run -p obeliskd-cli -- --socket /tmp/o.sock supernet alloc --supernet obd 
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock supernet list --format json
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock subnet alloc --supernet obd --subnet k3d-dev --kind docker --size 24 --reserve-size 26
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock subnet list
+cargo run -p obeliskd-cli -- --socket /tmp/o.sock subnet dealloc --supernet obd --subnet k3d-dev
 #   port 5379, not 53 (needs root) or 5353 (mDNS, already held by avahi/browsers).
 #   --state-dir and --dns-address are `daemon run` flags; clients only ever need --socket.
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock daemon health  # call it

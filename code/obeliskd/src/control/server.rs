@@ -4,7 +4,7 @@ use axum::extract::connect_info::Connected;
 use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::serve::{IncomingStream, Listener};
 use axum::{Json, Router};
 use std::sync::Arc;
@@ -12,9 +12,10 @@ use std::sync::Arc;
 use super::Peer;
 use super::api::{
     DaemonInfo, ErrorBody, Health, SubnetAlloc, SubnetEntry, SubnetQuery, SupernetAlloc,
+    SupernetDealloc,
 };
 use super::auth::Admin;
-use crate::model::Supernet;
+use crate::model::{Name, Supernet};
 use crate::state::Store;
 use crate::{ObeliskdError, Platform, PlatformImpl};
 
@@ -103,7 +104,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/supernets", get(list_supernets).post(alloc_supernet))
+        .route("/supernets/{supernet}", delete(dealloc_supernet))
         .route("/subnets", get(list_subnets).post(alloc_subnet))
+        .route("/subnets/{supernet}/{subnet}", delete(dealloc_subnet))
         .with_state(state)
 }
 
@@ -175,6 +178,30 @@ async fn alloc_subnet(
             subnet,
         }),
     ))
+}
+
+async fn dealloc_supernet(
+    _: Admin,
+    State(state): State<AppState>,
+    path: Result<axum::extract::Path<Name>, axum::extract::rejection::PathRejection>,
+    query: Result<axum::extract::Query<SupernetDealloc>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<Supernet>, ApiError> {
+    let axum::extract::Path(name) = path.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    let axum::extract::Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    Ok(Json(
+        state.store.dealloc_supernet(&name, query.recursive).await?,
+    ))
+}
+
+async fn dealloc_subnet(
+    _: Admin,
+    State(state): State<AppState>,
+    path: Result<axum::extract::Path<(Name, Name)>, axum::extract::rejection::PathRejection>,
+) -> Result<Json<SubnetEntry>, ApiError> {
+    let axum::extract::Path((supernet, name)) =
+        path.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    let subnet = state.store.dealloc_subnet(&supernet, &name).await?;
+    Ok(Json(SubnetEntry { supernet, subnet }))
 }
 
 //
@@ -361,6 +388,74 @@ mod tests {
             serde_json::json!({ "supernet": "obd", "name": "x", "kind": "host", "size": 24 });
         let (status, _) = post_json(app(dir.path(), stranger), "/subnets", request).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    async fn delete(app: Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        send(app, Request::delete(uri).body(Body::empty()).unwrap()).await
+    }
+
+    #[tokio::test]
+    async fn dealloc_over_the_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = || app(dir.path(), ROOT);
+        post_json(
+            root(),
+            "/supernets",
+            serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16" }),
+        )
+        .await;
+        post_json(
+            root(),
+            "/subnets",
+            serde_json::json!({ "supernet": "obd", "name": "a", "kind": "host", "size": 24 }),
+        )
+        .await;
+
+        let stranger = Peer {
+            uid: 4242,
+            gid: 4242,
+            pid: None,
+        };
+        let (status, _) = delete(app(dir.path(), stranger), "/subnets/obd/a").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, body) = delete(root(), "/supernets/obd").await;
+        assert_eq!(status, StatusCode::CONFLICT, "still has a subnet");
+        assert!(
+            body["error"].as_str().unwrap().contains("--recursive"),
+            "{body}"
+        );
+
+        let (status, body) = delete(root(), "/subnets/obd/a").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["supernet"], "obd");
+        assert_eq!(body["name"], "a");
+        let (status, _) = delete(root(), "/subnets/obd/a").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, body) = delete(root(), "/supernets/obd").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16" })
+        );
+        let (status, _) = delete(root(), "/supernets/Bad_Name").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        post_json(
+            root(),
+            "/supernets",
+            serde_json::json!({ "name": "lab", "cidr": "10.58.0.0/16" }),
+        )
+        .await;
+        post_json(
+            root(),
+            "/subnets",
+            serde_json::json!({ "supernet": "lab", "name": "x", "kind": "host", "size": 24 }),
+        )
+        .await;
+        let (status, body) = delete(root(), "/supernets/lab?recursive=true").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["subnets"][0]["name"], "x", "the subnets it took along");
     }
 
     #[tokio::test]
