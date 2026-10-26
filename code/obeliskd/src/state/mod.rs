@@ -555,6 +555,7 @@ impl Store {
         supernet: &Name,
         subnet: &Name,
         name: Name,
+        tag: Option<Name>,
     ) -> Result<IpIn, ObeliskdError> {
         let mut config = self.config.lock().await;
         let mut next = config.clone();
@@ -570,6 +571,7 @@ impl Store {
         let new = Ip {
             name,
             address,
+            tag,
             hosts: Vec::new(),
         };
         parent.ips.push(new.clone());
@@ -582,6 +584,7 @@ impl Store {
         }
         self.commit(&mut config, next);
         tracing::info!(
+            tag = ?new.tag,
             "allocated ip {supernet}/{subnet}/{} = {}",
             new.name,
             new.address
@@ -970,7 +973,10 @@ mod tests {
             (modified("alloc/obd.toml"), modified("alloc/obd/b.toml"));
         std::thread::sleep(std::time::Duration::from_millis(20));
 
-        store.alloc_ip(&obd, &name("a"), name("db")).await.unwrap();
+        store
+            .alloc_ip(&obd, &name("a"), name("db"), None)
+            .await
+            .unwrap();
         assert_eq!(
             modified("alloc/obd.toml"),
             supernet_before,
@@ -1242,26 +1248,35 @@ mod tests {
             .unwrap();
         let (host, dev) = (name("host"), name("dev"));
 
-        let db = store.alloc_ip(&obd, &host, name("db")).await.unwrap();
+        let db = store.alloc_ip(&obd, &host, name("db"), None).await.unwrap();
         assert_eq!(
             db.ip.address,
             "10.57.0.1".parse::<std::net::Ipv4Addr>().unwrap()
         );
-        let web = store.alloc_ip(&obd, &host, name("web")).await.unwrap();
+        let web = store
+            .alloc_ip(&obd, &host, name("web"), None)
+            .await
+            .unwrap();
         assert_eq!(web.ip.address.to_string(), "10.57.0.2");
-        let ingress = store.alloc_ip(&obd, &dev, name("ingress")).await.unwrap();
+        let ingress = store
+            .alloc_ip(&obd, &dev, name("ingress"), None)
+            .await
+            .unwrap();
         assert_eq!(
             ingress.ip.address.to_string(),
             "10.57.1.64",
             "after Docker's slice"
         );
 
-        let taken = store.alloc_ip(&obd, &host, name("db")).await;
+        let taken = store.alloc_ip(&obd, &host, name("db"), None).await;
         assert!(matches!(taken, Err(ObeliskdError::Conflict(_))));
 
         // Freed addresses are handed out again, lowest first.
         store.dealloc_ip(&obd, &host, &name("db")).await.unwrap();
-        let again = store.alloc_ip(&obd, &host, name("cache")).await.unwrap();
+        let again = store
+            .alloc_ip(&obd, &host, name("cache"), None)
+            .await
+            .unwrap();
         assert_eq!(again.ip.address.to_string(), "10.57.0.1");
 
         let listed = load(dir.path()).ips(Some(&obd), Some(&host)).await.unwrap();
@@ -1278,6 +1293,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_ip_tag_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = load(dir.path());
+        let obd = name("obd");
+        store
+            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .await
+            .unwrap();
+        store
+            .alloc_subnet(&obd, name("host"), SubnetKind::Host, 24, None)
+            .await
+            .unwrap();
+        let tagged = store
+            .alloc_ip(&obd, &name("host"), name("db"), Some(name("pr-42")))
+            .await
+            .unwrap();
+        assert_eq!(tagged.ip.tag, Some(name("pr-42")));
+        let file = std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap();
+        assert!(file.contains("tag = \"pr-42\""), "{file}");
+        let reloaded = load(dir.path()).ips(None, None).await.unwrap();
+        assert_eq!(reloaded[0].ip.tag, Some(name("pr-42")));
+    }
+
+    #[tokio::test]
     async fn subnets_with_ips_need_recursive() {
         let dir = tempfile::tempdir().unwrap();
         let (store, os) = load_with(dir.path());
@@ -1291,7 +1330,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .alloc_ip(&obd, &name("host"), name("db"))
+            .alloc_ip(&obd, &name("host"), name("db"), None)
             .await
             .unwrap();
 
@@ -1320,7 +1359,9 @@ mod tests {
             store.ips(Some(&name("x")), None).await,
             Err(ObeliskdError::NotFound(_))
         ));
-        let missing = store.alloc_ip(&name("x"), &name("y"), name("z")).await;
+        let missing = store
+            .alloc_ip(&name("x"), &name("y"), name("z"), None)
+            .await;
         assert!(matches!(missing, Err(ObeliskdError::NotFound(_))));
     }
 
@@ -1335,7 +1376,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .alloc_ip(&obd, &name("host"), name("web"))
+            .alloc_ip(&obd, &name("host"), name("web"), None)
             .await
             .unwrap();
     }

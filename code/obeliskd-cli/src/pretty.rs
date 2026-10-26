@@ -67,7 +67,7 @@ pub fn subnets(supernets: &[SupernetNode]) -> String {
 }
 
 pub fn ips(supernets: &[SupernetNode]) -> String {
-    let mut rows: Vec<[String; 5]> = Vec::new();
+    let mut rows: Vec<[String; 6]> = Vec::new();
     for_each_ip(supernets, |parents, ip| {
         let [supernet, subnet, kind] = parents;
         rows.push(match ip {
@@ -77,12 +77,13 @@ pub fn ips(supernets: &[SupernetNode]) -> String {
                 kind,
                 ip.name.to_string(),
                 ip.address.to_string(),
+                or_dash(ip.tag.as_ref()),
             ],
             None => dashes(&[supernet, subnet, kind]),
         });
     });
     table(
-        &["SUPERNET", "SUBNET", "KIND", "IP", "ADDRESS"],
+        &["SUPERNET", "SUBNET", "KIND", "IP", "ADDRESS", "TAG"],
         &rows,
         &[1, 3],
     )
@@ -226,8 +227,13 @@ fn ip_change(verb: &str, supernet: &SupernetNode) -> String {
     let Some((subnet, ip)) = only_ip(supernet) else {
         return String::new();
     };
+    let tag = ip
+        .tag
+        .as_ref()
+        .map(|t| format!(" (tag {t})"))
+        .unwrap_or_default();
     format!(
-        "{verb} ip {}/{}/{} = {}\n",
+        "{verb} ip {}/{}/{} = {}{tag}\n",
         supernet.name, subnet.name, ip.name, ip.address
     )
 }
@@ -359,6 +365,7 @@ mod tests {
         IpNode {
             name: name(n),
             address: address.parse().unwrap(),
+            tag: (n == "db-2").then(|| name("pr-42")),
             hosts: Some(hosts.iter().map(|h| Hostname::parse(h).unwrap()).collect()),
         }
     }
@@ -407,7 +414,7 @@ mod tests {
             subnets(&[]),
             "SUPERNET  SUBNET  KIND  CIDR  DOCKER RANGE  GATEWAY  ADDRESSES\n"
         );
-        assert_eq!(ips(&[]), "SUPERNET  SUBNET  KIND  IP  ADDRESS\n");
+        assert_eq!(ips(&[]), "SUPERNET  SUBNET  KIND  IP  ADDRESS  TAG\n");
         assert_eq!(hosts(&[]), "SUPERNET  SUBNET  KIND  IP  ADDRESS  HOST\n");
     }
 
@@ -429,12 +436,12 @@ ex2       -       -       -             -             -          -
         assert_eq!(
             ips(&tree()),
             "\
-SUPERNET  SUBNET  KIND    IP    ADDRESS
-ex1       1       host    db-2  10.57.0.2
-                          db-3  10.57.0.1
-                          db-4  10.57.0.3
-          dev     docker  -     -
-ex2       -       -       -     -
+SUPERNET  SUBNET  KIND    IP    ADDRESS    TAG
+ex1       1       host    db-2  10.57.0.2  pr-42
+                          db-3  10.57.0.1  -
+                          db-4  10.57.0.3  -
+          dev     docker  -     -          -
+ex2       -       -       -     -          -
 "
         );
     }

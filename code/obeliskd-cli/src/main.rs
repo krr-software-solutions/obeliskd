@@ -218,6 +218,9 @@ enum IpCommand {
         /// Only this subnet's ips (needs --supernet)
         #[arg(long, requires = "supernet")]
         subnet: Option<Name>,
+        /// Only ips with this tag
+        #[arg(long)]
+        tag: Option<Name>,
         #[command(flatten)]
         output: Output,
     },
@@ -232,6 +235,9 @@ enum IpCommand {
         /// Its name, unique within the subnet, e.g. `db`
         #[arg(long)]
         ip: Name,
+        /// A group label, e.g. `pr-42`, to find (and later remove) a set of ips together
+        #[arg(long)]
+        tag: Option<Name>,
         #[command(flatten)]
         output: Output,
     },
@@ -560,18 +566,28 @@ async fn run_ip(socket: &Path, command: IpCommand) -> Result<(), ObeliskdError> 
         IpCommand::List {
             supernet,
             subnet,
+            tag,
             output,
-        } => command_ip_list(socket, IpQuery { supernet, subnet }, &output).await,
+        } => {
+            let query = IpQuery {
+                supernet,
+                subnet,
+                tag,
+            };
+            command_ip_list(socket, query, &output).await
+        }
         IpCommand::Alloc {
             supernet,
             subnet,
             ip,
+            tag,
             output,
         } => {
             let request = IpAlloc {
                 supernet,
                 subnet,
                 name: ip,
+                tag,
             };
             command_ip_alloc(socket, request, &output).await
         }

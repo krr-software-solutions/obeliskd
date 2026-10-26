@@ -203,6 +203,11 @@ async fn ip_path(
         .iter()
         .find(|s| &s.name == subnet)
         .ok_or_else(|| ApiError::internal(format!("subnet {supernet}/{subnet} vanished")))?;
+    // A host's node is built without the ip's tag: take it from the ip, if it's still there.
+    let mut node = node;
+    if let Some(ip) = sub.ips.iter().find(|ip| ip.name == node.name) {
+        node.tag.clone_from(&ip.tag);
+    }
     Ok(SupernetNode::path(&parent, SubnetNode::path(sub, node)))
 }
 
@@ -298,10 +303,20 @@ async fn list_ips(
     request: Result<Query<IpQuery>, QueryRejection>,
 ) -> Result<Json<Vec<SupernetNode>>, ApiError> {
     let request = query(request)?;
-    let tree = state
+    let mut tree = state
         .store
         .tree(request.supernet.as_ref(), request.subnet.as_ref())
         .await?;
+    if let Some(tag) = &request.tag {
+        // A filter: keep only that tag's ips, and only the branches that have any.
+        for supernet in &mut tree {
+            for subnet in &mut supernet.subnets {
+                subnet.ips.retain(|ip| ip.tag.as_ref() == Some(tag));
+            }
+            supernet.subnets.retain(|subnet| !subnet.ips.is_empty());
+        }
+        tree.retain(|supernet| !supernet.subnets.is_empty());
+    }
     Ok(Json(nodes(&tree, Depth::Ips)))
 }
 
@@ -313,7 +328,12 @@ async fn alloc_ip(
     let request = json_body(request)?;
     let ip = state
         .store
-        .alloc_ip(&request.supernet, &request.subnet, request.name)
+        .alloc_ip(
+            &request.supernet,
+            &request.subnet,
+            request.name,
+            request.tag,
+        )
         .await?;
     let node = IpNode::of(&ip.ip, Depth::Ips);
     Ok((
@@ -376,6 +396,7 @@ fn host_node(host: &HostIn) -> IpNode {
     IpNode {
         name: host.host.ip.clone(),
         address: host.address,
+        tag: None,
         hosts: Some(vec![host.host.name.clone()]),
     }
 }
@@ -741,6 +762,56 @@ mod tests {
         assert_eq!((status, body), (StatusCode::OK, entry));
         let (status, _) = delete(root(), "/hosts/app.obd.internal").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn ips_carry_an_optional_tag_and_filter_by_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = || app(dir.path(), ROOT);
+        post_json(
+            root(),
+            "/supernets",
+            serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16" }),
+        )
+        .await;
+        for subnet in ["a", "b"] {
+            post_json(root(), "/subnets", serde_json::json!({ "supernet": "obd", "name": subnet, "kind": "host", "size": 24 })).await;
+        }
+        let ip = |subnet: &str, name: &str, tag: Option<&str>| {
+            let mut body = serde_json::json!({ "supernet": "obd", "subnet": subnet, "name": name });
+            if let Some(tag) = tag {
+                body["tag"] = tag.into();
+            }
+            post_json(root(), "/ips", body)
+        };
+        let (status, body) = ip("a", "db", Some("pr-42")).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["subnets"][0]["ips"][0]["tag"], "pr-42");
+        let (_, body) = ip("a", "web", None).await;
+        assert!(
+            body["subnets"][0]["ips"][0].get("tag").is_none(),
+            "no tag, no field"
+        );
+        ip("b", "cache", Some("pr-42")).await;
+        let (status, _) = ip("b", "x", Some("Not_A_Name")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (_, body) = get_json(root(), "/ips?tag=pr-42").await;
+        let names: Vec<_> = body[0]["subnets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| {
+                s["ips"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i["name"].as_str().unwrap().to_string())
+            })
+            .collect();
+        assert_eq!(names, ["db", "cache"], "only the tag's ips, across subnets");
+        let (_, body) = get_json(root(), "/ips?tag=nothing").await;
+        assert_eq!(body, serde_json::json!([]), "no branches without matches");
     }
 
     #[tokio::test]

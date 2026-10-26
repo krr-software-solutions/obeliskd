@@ -9,6 +9,9 @@ use super::{Hostname, Name, Subnet, SubnetKind};
 pub struct Ip {
     pub name: Name,
     pub address: Ipv4Addr,
+    /// An optional group label ("sub-sub-net"), to find or remove a set of ips together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Name>,
     /// Hostnames that resolve to this address, sorted. Unique across every subnet; the ip can't be
     /// removed while it has any.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -81,6 +84,7 @@ mod tests {
             .map(|i| Ip {
                 name: Name::parse(&format!("i{i}")).unwrap(),
                 address: Ipv4Addr::new(10, 57, 0, i),
+                tag: None,
                 hosts: Vec::new(),
             })
             .collect();
@@ -118,6 +122,7 @@ mod tests {
             .map(|i| Ip {
                 name: Name::parse(&format!("i{i}")).unwrap(),
                 address: Ipv4Addr::new(10, 57, 3, i),
+                tag: None,
                 hosts: Vec::new(),
             })
             .collect();

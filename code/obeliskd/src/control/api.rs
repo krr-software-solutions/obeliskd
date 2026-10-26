@@ -77,15 +77,20 @@ pub struct IpAlloc {
     pub supernet: Name,
     pub subnet: Name,
     pub name: Name,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Name>,
 }
 
-/// `GET /ips?supernet=…&subnet=…` (`subnet` needs `supernet`).
+/// `GET /ips?supernet=…&subnet=…&tag=…` (`subnet` needs `supernet`). With `tag`, only that tag's
+/// ips, and only the branches that have any.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IpQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supernet: Option<Name>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subnet: Option<Name>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Name>,
 }
 
 /// `POST /hosts`: point a hostname at an ip.
@@ -134,6 +139,8 @@ pub struct SubnetNode {
 pub struct IpNode {
     pub name: Name,
     pub address: Ipv4Addr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Name>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosts: Option<Vec<Hostname>>,
 }
@@ -195,6 +202,7 @@ impl IpNode {
         IpNode {
             name: ip.name.clone(),
             address: ip.address,
+            tag: ip.tag.clone(),
             hosts: (depth >= Depth::Hosts).then(|| ip.hosts.clone()),
         }
     }
