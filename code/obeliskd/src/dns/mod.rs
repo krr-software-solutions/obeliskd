@@ -9,7 +9,7 @@
 pub mod hosts;
 pub mod wire;
 
-use std::net::SocketAddrV4;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::{Arc, RwLock};
 
 use tokio::net::UdpSocket;
@@ -33,32 +33,67 @@ pub type SharedHosts = Arc<RwLock<Arc<HostTable>>>;
 /// The response to one query packet, or `None` to drop it.
 #[must_use]
 pub fn respond(packet: &[u8], hosts: &HostTable) -> Option<Vec<u8>> {
+    answer(packet, hosts).map(|(response, _)| response)
+}
+
+/// What a query asked and got, for the log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outcome {
+    /// `"A app.obd.internal"`, or `None` when there was no readable question.
+    pub question: Option<String>,
+    pub rcode: Rcode,
+    pub address: Option<Ipv4Addr>,
+}
+
+impl std::fmt::Display for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let question = self.question.as_deref().unwrap_or("(no question)");
+        write!(f, "{question} → {}", rcode_name(self.rcode))?;
+        match self.address {
+            Some(address) => write!(f, " {address}"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Like [`respond`], with what was asked and answered.
+#[must_use]
+pub fn answer(packet: &[u8], hosts: &HostTable) -> Option<(Vec<u8>, Outcome)> {
     let header = Header::parse(packet)?;
     if header.is_response() {
         return None;
     }
+    let unreadable = |rcode| {
+        let outcome = Outcome {
+            question: None,
+            rcode,
+            address: None,
+        };
+        Some((wire::response(header, rcode, false, None, None), outcome))
+    };
     if header.opcode() != OPCODE_QUERY {
-        return Some(wire::response(header, Rcode::NotImp, false, None, None));
+        return unreadable(Rcode::NotImp);
     }
     if header.qdcount != 1 {
-        return Some(wire::response(header, Rcode::FormErr, false, None, None));
+        return unreadable(Rcode::FormErr);
     }
     let Ok(question) = Question::parse(packet) else {
-        return Some(wire::response(header, Rcode::FormErr, false, None, None));
+        return unreadable(Rcode::FormErr);
     };
 
+    let name = question.name.to_dotted();
+    let asked = Some(format!("{} {name}", type_name(question.qtype)));
     if question.qclass != CLASS_IN || !question.name.is_in(ZONE) {
-        return Some(wire::response(
-            header,
-            Rcode::Refused,
-            false,
-            Some(&question),
-            None,
-        ));
+        let response = wire::response(header, Rcode::Refused, false, Some(&question), None);
+        let outcome = Outcome {
+            question: asked,
+            rcode: Rcode::Refused,
+            address: None,
+        };
+        return Some((response, outcome));
     }
 
     // Ours: authoritative from here on.
-    let name = question.name.to_dotted();
     let (rcode, answer) = match hosts.lookup(&name) {
         Some(address) => {
             let answer = (question.qtype == TYPE_A).then_some(ARecord {
@@ -73,13 +108,41 @@ pub fn respond(packet: &[u8], hosts: &HostTable) -> Option<Vec<u8>> {
         None if name == ZONE || hosts.has_below(&name) => (Rcode::NoError, None),
         None => (Rcode::NxDomain, None),
     };
-    Some(wire::response(
-        header,
+    let response = wire::response(header, rcode, true, Some(&question), answer.as_ref());
+    let outcome = Outcome {
+        question: asked,
         rcode,
-        true,
-        Some(&question),
-        answer.as_ref(),
-    ))
+        address: answer.map(|a| a.address),
+    };
+    Some((response, outcome))
+}
+
+fn rcode_name(rcode: Rcode) -> &'static str {
+    match rcode {
+        Rcode::NoError => "NOERROR",
+        Rcode::FormErr => "FORMERR",
+        Rcode::NxDomain => "NXDOMAIN",
+        Rcode::NotImp => "NOTIMP",
+        Rcode::Refused => "REFUSED",
+    }
+}
+
+fn type_name(qtype: u16) -> String {
+    match qtype {
+        1 => "A".into(),
+        2 => "NS".into(),
+        5 => "CNAME".into(),
+        6 => "SOA".into(),
+        12 => "PTR".into(),
+        15 => "MX".into(),
+        16 => "TXT".into(),
+        28 => "AAAA".into(),
+        33 => "SRV".into(),
+        64 => "SVCB".into(),
+        65 => "HTTPS".into(),
+        255 => "ANY".into(),
+        other => format!("TYPE{other}"),
+    }
 }
 
 /// Binds the DNS socket (UDP).
@@ -104,25 +167,25 @@ pub async fn serve(socket: UdpSocket, hosts: SharedHosts) {
         let (len, from) = match socket.recv_from(&mut buf).await {
             Ok(received) => received,
             Err(e) => {
-                eprintln!("obeliskd: DNS receive failed: {e}");
+                tracing::warn!(error = %e, "DNS receive failed");
                 continue;
             }
         };
         // Cloning the Arc is all the lock is held for.
         let table = Arc::clone(&hosts.read().expect("the host table lock is never poisoned"));
-        let Some(response) = respond(&buf[..len], &table) else {
+        let Some((response, outcome)) = answer(&buf[..len], &table) else {
+            tracing::debug!(%from, "dropped a DNS packet that isn't a query");
             continue;
         };
+        tracing::info!(%from, "{outcome}");
         if let Err(e) = socket.send_to(&response, from).await {
-            eprintln!("obeliskd: DNS reply to {from} failed: {e}");
+            tracing::warn!(%from, error = %e, "DNS reply failed");
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
-
     use super::*;
 
     fn hosts() -> HostTable {
@@ -219,6 +282,25 @@ mod tests {
             (0, 0),
             "NODATA: names exist below it"
         );
+    }
+
+    #[test]
+    fn outcomes_say_what_was_asked_and_answered() {
+        let outcome =
+            |name: &str, qtype| answer(&query(name, qtype), &hosts()).unwrap().1.to_string();
+        assert_eq!(
+            outcome("my.nested.obd.internal", TYPE_A),
+            "A my.nested.obd.internal → NOERROR 10.57.0.5"
+        );
+        assert_eq!(
+            outcome("my.nested.obd.internal", TYPE_AAAA),
+            "AAAA my.nested.obd.internal → NOERROR"
+        );
+        assert_eq!(
+            outcome("nope.obd.internal", TYPE_A),
+            "A nope.obd.internal → NXDOMAIN"
+        );
+        assert_eq!(outcome("example.com", TYPE_A), "A example.com → REFUSED");
     }
 
     #[test]

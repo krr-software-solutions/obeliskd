@@ -92,6 +92,24 @@ idempotent (ensure present / ensure absent):
 - **Tests:** they use `os::fake::RecordingOs`, which records calls and can be told to fail. The
   real Docker path has an opt-in test: `cargo test -- --ignored` (needs Docker access).
 
+## Logging
+
+The daemon logs with `tracing`. The CLI sets up the subscriber for `daemon run` only:
+`--log-level` / `OBELISKD_LOG`, default `info`, takes `EnvFilter` syntax such as
+`info,obeliskd::dns=warn`. Output goes to stderr, with color only on a terminal. Client commands
+don't log.
+
+| What | Level | Where |
+|---|---|---|
+| startup steps (state loaded, reconcile, DNS bound, socket bound, ready), shutdown | info | `daemon.rs` |
+| each control API request: `POST /ips → 201 Created (2ms) uid=0` | info (warn on 5xx) | `log_request` middleware, `control/server.rs` |
+| what each change did: `allocated ip ex1/1/db = 10.57.0.1` | info | `state/mod.rs` |
+| each DNS query: `A app.obd.internal → NOERROR 10.57.0.1 from=…` | info | `dns::serve` |
+| each OS command run (`ip …`, `docker …`) | debug | `os/command.rs` |
+| reconcile failures, failed replies, tightened permissions | warn | where they happen |
+
+Use `tracing::{info, warn, debug}`, never `eprintln!`, in the library.
+
 ## The control API (`code/obeliskd/src/control/`)
 
 HTTP over the control socket: the daemon serves it with axum, and the CLI calls it with reqwest.

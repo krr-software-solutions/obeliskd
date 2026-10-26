@@ -112,8 +112,8 @@ impl Store {
     pub fn load(dir: &Path, os: Arc<dyn OsEffects>) -> Result<Self, ObeliskdError> {
         let (config, migrated) = files::load(dir)?;
         if migrated {
-            eprintln!(
-                "obeliskd: moved subnets out of {CONFIG_FILE} into {}/<supernet>/<subnet>.toml",
+            tracing::info!(
+                "moved allocations out of {CONFIG_FILE} into {}/",
                 files::ALLOC_DIR
             );
         }
@@ -158,6 +158,18 @@ impl Store {
             }
         }
         errors
+    }
+
+    /// How much is allocated, for the startup log.
+    pub async fn counts(&self) -> Counts {
+        let config = self.config.lock().await;
+        let subnets = || config.supernets.iter().flat_map(|s| &s.subnets);
+        Counts {
+            supernets: config.supernets.len(),
+            subnets: subnets().count(),
+            ips: subnets().map(|s| s.ips.len()).sum(),
+            hosts: config.hosts().count(),
+        }
     }
 
     /// The whole tree, or just one supernet (and within it, one subnet).
@@ -251,6 +263,7 @@ impl Store {
             return Err(error);
         }
         self.commit(&mut config, next);
+        tracing::info!("allocated supernet {} ({})", supernet.name, supernet.cidr);
         Ok(supernet)
     }
 }
@@ -352,6 +365,12 @@ impl Store {
             return Err(error);
         }
         self.commit(&mut config, next);
+        tracing::info!(
+            "allocated {} subnet {supernet}/{} ({})",
+            subnet.kind,
+            subnet.name,
+            subnet.cidr
+        );
         Ok(subnet)
     }
 }
@@ -394,6 +413,12 @@ impl Store {
         self.os.remove_supernet(&removed)?;
         files::persist(&self.dir, &config, &next)?;
         self.commit(&mut config, next);
+        tracing::info!(
+            subnets = removed.subnets.len(),
+            "deallocated supernet {} ({})",
+            removed.name,
+            removed.cidr
+        );
         Ok(removed)
     }
 
@@ -438,8 +463,23 @@ impl Store {
         self.os.remove_subnet(supernet, &removed)?;
         files::persist(&self.dir, &config, &next)?;
         self.commit(&mut config, next);
+        tracing::info!(
+            ips = removed.ips.len(),
+            "deallocated subnet {supernet}/{} ({})",
+            removed.name,
+            removed.cidr
+        );
         Ok(removed)
     }
+}
+
+/// How much is allocated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub supernets: usize,
+    pub subnets: usize,
+    pub ips: usize,
+    pub hosts: usize,
 }
 
 /// An ip with where it lives.
@@ -541,6 +581,11 @@ impl Store {
             return Err(error);
         }
         self.commit(&mut config, next);
+        tracing::info!(
+            "allocated ip {supernet}/{subnet}/{} = {}",
+            new.name,
+            new.address
+        );
         Ok(IpIn {
             supernet: supernet.clone(),
             subnet: subnet.clone(),
@@ -577,6 +622,11 @@ impl Store {
         let kind = parent.kind;
         files::persist(&self.dir, &config, &next)?;
         self.commit(&mut config, next);
+        tracing::info!(
+            "deallocated ip {supernet}/{subnet}/{} ({})",
+            removed.name,
+            removed.address
+        );
         Ok(IpIn {
             supernet: supernet.clone(),
             subnet: subnet.clone(),
@@ -634,6 +684,13 @@ impl Store {
         let address = ip.address;
         files::persist(&self.dir, &config, &next)?;
         self.commit(&mut config, next);
+        tracing::info!(
+            "allocated host {} → ip {}/{}/{} ({address})",
+            host.name,
+            host.supernet,
+            host.subnet,
+            host.ip
+        );
         Ok(HostIn { host, address })
     }
 
@@ -659,6 +716,7 @@ impl Store {
         ip.hosts.retain(|h| h != name);
         files::persist(&self.dir, &config, &next)?;
         self.commit(&mut config, next);
+        tracing::info!("deallocated host {}", host.name);
         Ok(HostIn { host, address })
     }
 }

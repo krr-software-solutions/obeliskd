@@ -17,6 +17,7 @@ pub struct Output {
 ///
 /// [`ObeliskdError::Os`] if it can't be started at all (e.g. not installed).
 pub fn run(program: &str, args: &[String]) -> Result<Output, ObeliskdError> {
+    tracing::debug!(command = %describe(program, args), "running");
     let output = Command::new(program)
         .args(args)
         .output()

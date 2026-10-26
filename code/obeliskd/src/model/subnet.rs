@@ -15,6 +15,15 @@ pub enum SubnetKind {
     Docker,
 }
 
+impl std::fmt::Display for SubnetKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SubnetKind::Host => "host",
+            SubnetKind::Docker => "docker",
+        })
+    }
+}
+
 /// A range carved from a supernet, with a kind. obeliskd always picks the range.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

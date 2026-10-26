@@ -33,7 +33,7 @@ impl Connected<IncomingStream<'_, <Platform as PlatformImpl>::ControlListener>> 
         stream: IncomingStream<'_, <Platform as PlatformImpl>::ControlListener>,
     ) -> Self {
         let peer = Platform::peer(stream.io())
-            .inspect_err(|e| eprintln!("obeliskd: couldn't read a caller's credentials: {e}"))
+            .inspect_err(|e| tracing::warn!(error = %e, "couldn't read a caller's credentials"))
             .ok();
         ConnInfo { peer }
     }
@@ -113,7 +113,28 @@ pub fn router(state: AppState) -> Router {
         .route("/ips/{supernet}/{subnet}/{ip}", delete(dealloc_ip))
         .route("/hosts", get(list_hosts).post(alloc_host))
         .route("/hosts/{host}", delete(dealloc_host))
+        .layer(axum::middleware::from_fn(log_request))
         .with_state(state)
+}
+
+/// Logs every request once it's answered: method, path, status, who asked, and how long it took.
+async fn log_request(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let (method, uri) = (request.method().clone(), request.uri().clone());
+    let uid = request
+        .extensions()
+        .get::<ConnectInfo<ConnInfo>>()
+        .and_then(|ConnectInfo(conn)| conn.peer)
+        .map_or_else(|| "?".to_string(), |peer| peer.uid.to_string());
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    let status = response.status();
+    let ms = started.elapsed().as_millis();
+    if status.is_server_error() {
+        tracing::warn!(%uid, "{method} {uri} → {status} ({ms}ms)");
+    } else {
+        tracing::info!(%uid, "{method} {uri} → {status} ({ms}ms)");
+    }
+    response
 }
 
 async fn health(

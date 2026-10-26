@@ -85,6 +85,9 @@ enum DaemonCommand {
             default_value_os_t = Platform::state_dir()
         )]
         state_dir: PathBuf,
+        /// What to log: a level (`info`, `debug`, …) or a filter like `info,obeliskd::dns=warn`
+        #[arg(long, env = "OBELISKD_LOG", default_value = "info")]
+        log_level: String,
     },
     /// Ask the running daemon how it's doing, and who it sees you as
     Health {
@@ -437,6 +440,21 @@ async fn command_host_dealloc(
     Ok(())
 }
 
+/// The daemon logs to stderr (journald, under systemd); client commands don't log.
+fn init_logging(filter: &str) -> Result<(), ObeliskdError> {
+    let filter = tracing_subscriber::EnvFilter::try_new(filter).map_err(|e| {
+        ObeliskdError::Invalid(format!("--log-level {filter:?} isn't a valid filter: {e}"))
+    })?;
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        // Colors only on a terminal, not in journald or a file.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .with_writer(std::io::stderr)
+        .init();
+    Ok(())
+}
+
 fn command_completions(shell: clap_complete::Shell) {
     let mut cmd = command();
     let name = cmd.get_name().to_string();
@@ -481,7 +499,11 @@ async fn run_daemon(socket: &Path, command: DaemonCommand) -> Result<(), Obelisk
         DaemonCommand::Run {
             dns_address,
             state_dir,
-        } => command_daemon_run(socket, dns_address, &state_dir).await,
+            log_level,
+        } => {
+            init_logging(&log_level)?;
+            command_daemon_run(socket, dns_address, &state_dir).await
+        }
         DaemonCommand::Health { output } => command_daemon_health(socket, &output).await,
     }
 }

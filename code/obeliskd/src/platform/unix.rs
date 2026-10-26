@@ -88,9 +88,9 @@ pub fn prepare_state_dir(dir: &Path) -> Result<(), ObeliskdError> {
             let private = if metadata.is_dir() { 0o700 } else { 0o600 };
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(private))
                 .map_err(|e| error(format!("couldn't tighten {}: {e}", path.display())))?;
-            eprintln!(
-                "obeliskd: {} was readable by others (mode {mode:o}); tightened to {private:o}",
-                path.display()
+            tracing::warn!(
+                path = %path.display(),
+                "was readable by others (mode {mode:o}); tightened to {private:o}"
             );
         }
     }
@@ -104,7 +104,7 @@ pub fn is_local(address: Ipv4Addr) -> bool {
 
 pub fn unbind_control(path: &Path) {
     if let Err(e) = std::fs::remove_file(path) {
-        eprintln!("obeliskd: couldn't remove {}: {e}", path.display());
+        tracing::warn!(path = %path.display(), error = %e, "couldn't remove the control socket");
     }
 }
 
