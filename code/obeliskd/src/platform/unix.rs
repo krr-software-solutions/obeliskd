@@ -167,6 +167,7 @@ mod tests {
     use crate::control::api::DaemonInfo;
     use crate::control::client::ControlClient;
     use crate::control::server::{AppState, serve};
+    use crate::model::{Actor, Name, SubnetKind};
     use crate::state::Store;
     use crate::{Platform, PlatformImpl};
 
@@ -181,15 +182,16 @@ mod tests {
 
         let listener = bind_control(&socket).unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let store = std::sync::Arc::new(
+            Store::load(
+                dir.path(),
+                std::sync::Arc::new(crate::os::fake::RecordingOs::default()),
+            )
+            .unwrap(),
+        );
         let state = AppState {
             daemon,
-            store: std::sync::Arc::new(
-                Store::load(
-                    dir.path(),
-                    std::sync::Arc::new(crate::os::fake::RecordingOs::default()),
-                )
-                .unwrap(),
-            ),
+            store: store.clone(),
             users: std::sync::Arc::new(crate::users::SystemUsers),
         };
         let server = tokio::spawn(serve(listener, state, async {
@@ -200,6 +202,35 @@ mod tests {
         // We created the socket, so it's owned by our uid: the caller the daemon saw.
         assert_eq!(health.caller.uid, std::fs::metadata(&socket).unwrap().uid());
         assert_eq!(health.daemon, daemon);
+
+        // One ip: found is its path, missing anything is None (not an error).
+        let (root, name) = (&Actor::ROOT, |s: &str| Name::parse(s).unwrap());
+        let obd = name("obd");
+        store
+            .alloc_supernet(root, obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .await
+            .unwrap();
+        store
+            .alloc_subnet(root, &obd, name("a"), SubnetKind::Host, 24, None)
+            .await
+            .unwrap();
+        store
+            .alloc_ip(root, &obd, &name("a"), name("db"), None)
+            .await
+            .unwrap();
+        let client = ControlClient::new(&socket).unwrap();
+        let found = client
+            .ip(&obd, &name("a"), &name("db"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.ip.address, Ipv4Addr::new(10, 57, 0, 1));
+        assert_eq!(found.subnet.name, name("a"));
+        assert_eq!(client.ip(&obd, &name("a"), &name("x")).await.unwrap(), None);
+        assert_eq!(
+            client.ip(&obd, &name("x"), &name("db")).await.unwrap(),
+            None
+        );
 
         stop.send(()).unwrap();
         server.await.unwrap().unwrap();

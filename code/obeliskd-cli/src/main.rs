@@ -229,6 +229,21 @@ enum IpCommand {
         #[command(flatten)]
         output: Output,
     },
+    /// Print one ip's address, for scripts: exits 0 if it exists, 1 if not (supernet, subnet or
+    /// ip), 2 on any other error
+    Resolve {
+        /// The supernet the subnet is in
+        #[arg(long)]
+        supernet: Name,
+        /// The subnet it's in
+        #[arg(long)]
+        subnet: Name,
+        /// The ip
+        #[arg(long)]
+        ip: Name,
+        #[command(flatten)]
+        output: ResolveOutput,
+    },
     /// Give a name the lowest free address in a subnet (needs use on the subnet)
     Alloc {
         /// The supernet the subnet is in
@@ -406,6 +421,23 @@ struct Output {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Format {
     Pretty,
+    Json,
+}
+
+/// `ip resolve`'s own `--format`: made for scripts.
+#[derive(Debug, Args)]
+#[command(next_help_heading = EXTRA)]
+struct ResolveOutput {
+    /// Output format
+    #[arg(long, value_enum, default_value_t = ResolveFormat::Simple)]
+    format: ResolveFormat,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ResolveFormat {
+    /// Just the address (nothing if not found)
+    Simple,
+    /// `{ supernet, subnet, ip }`, side by side (`null` if not found)
     Json,
 }
 
@@ -693,8 +725,43 @@ async fn run_subnet(socket: &Path, command: SubnetCommand) -> Result<(), Obelisk
     }
 }
 
+/// `ip resolve`: 0 found, 1 not found, 2 any other error (printed to stderr).
+async fn command_ip_resolve(
+    socket: &Path,
+    supernet: &Name,
+    subnet: &Name,
+    ip: &Name,
+    output: &ResolveOutput,
+) -> ExitCode {
+    let found = match ControlClient::new(socket) {
+        Ok(client) => client.ip(supernet, subnet, ip).await,
+        Err(error) => Err(error),
+    };
+    match (found, output.format) {
+        (Ok(Some(found)), ResolveFormat::Simple) => {
+            println!("{}", found.ip.address);
+            ExitCode::SUCCESS
+        }
+        (Ok(Some(found)), ResolveFormat::Json) => {
+            let json = serde_json::to_string_pretty(&found).expect("API types serialize");
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        (Ok(None), ResolveFormat::Simple) => ExitCode::FAILURE,
+        (Ok(None), ResolveFormat::Json) => {
+            println!("null");
+            ExitCode::FAILURE
+        }
+        (Err(error), _) => {
+            eprintln!("ERROR - {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 async fn run_ip(socket: &Path, command: IpCommand) -> Result<(), ObeliskdError> {
     match command {
+        IpCommand::Resolve { .. } => unreachable!("main_impl runs ip resolve itself"),
         IpCommand::List {
             supernet,
             subnet,
@@ -831,9 +898,23 @@ async fn run_grant(socket: &Path, command: GrantCommand) -> Result<(), ObeliskdE
     Ok(())
 }
 
-async fn main_impl() -> Result<(), ObeliskdError> {
+async fn main_impl() -> Result<ExitCode, ObeliskdError> {
     let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
     let socket: PathBuf = cli.socket;
+
+    // The one command with exit codes of its own.
+    if let Command::Ip {
+        command:
+            IpCommand::Resolve {
+                supernet,
+                subnet,
+                ip,
+                output,
+            },
+    } = &cli.command
+    {
+        return Ok(command_ip_resolve(&socket, supernet, subnet, ip, output).await);
+    }
 
     match cli.command {
         Command::Daemon { command } => run_daemon(&socket, command).await,
@@ -847,6 +928,7 @@ async fn main_impl() -> Result<(), ObeliskdError> {
             Ok(())
         }
     }
+    .map(|()| ExitCode::SUCCESS)
 }
 
 // Not one worker per core (tokio's default): DNS is a single receive loop and the control API sees a
@@ -854,7 +936,7 @@ async fn main_impl() -> Result<(), ObeliskdError> {
 #[tokio::main(worker_threads = 4)]
 async fn main() -> ExitCode {
     match main_impl().await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("ERROR - {error}");
             ExitCode::FAILURE

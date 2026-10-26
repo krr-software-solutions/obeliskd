@@ -7,8 +7,8 @@ use serde::de::DeserializeOwned;
 
 use super::api::{
     ErrorBody, GrantAdd, GrantCheck, GrantCheckQuery, GrantNode, GrantQuery, Health, HostAlloc,
-    IpAlloc, IpDealloc, IpDeallocTagged, IpQuery, SubnetAlloc, SubnetDealloc, SubnetQuery,
-    SupernetAlloc, SupernetDealloc, SupernetNode,
+    IpAlloc, IpDealloc, IpDeallocTagged, IpQuery, IpResolved, SubnetAlloc, SubnetDealloc,
+    SubnetQuery, SupernetAlloc, SupernetDealloc, SupernetNode,
 };
 use crate::model::{Hostname, Name};
 use crate::{ObeliskdError, Platform, PlatformImpl};
@@ -115,6 +115,26 @@ impl ControlClient {
     /// If the daemon can't be reached, or answers with an error (e.g. an unknown subnet).
     pub async fn ips(&self, query: &IpQuery) -> Result<Vec<SupernetNode>, ObeliskdError> {
         self.send(self.http.get(url("/ips")).query(query)).await
+    }
+
+    /// `GET /ips/{supernet}/{subnet}/{ip}`: one ip and where it lives, or `None` if it (or its supernet
+    /// or subnet) doesn't exist.
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or answers with any other error.
+    pub async fn ip(
+        &self,
+        supernet: &Name,
+        subnet: &Name,
+        ip: &Name,
+    ) -> Result<Option<IpResolved>, ObeliskdError> {
+        let path = format!("/ips/{supernet}/{subnet}/{ip}");
+        match self.get(&path).await {
+            Ok(node) => Ok(Some(node)),
+            Err(ObeliskdError::ControlStatus { status: 404, .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// `POST /ips`

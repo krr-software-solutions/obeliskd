@@ -236,6 +236,15 @@ pub struct ErrorBody {
     pub error: String,
 }
 
+/// `GET /ips/{supernet}/{subnet}/{ip}`: one ip and where it lives, side by side rather than
+/// nested (the supernet without its subnets, the subnet without its ips, the ip with its hosts).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpResolved {
+    pub supernet: SupernetNode,
+    pub subnet: SubnetNode,
+    pub ip: IpNode,
+}
+
 // ----- grants -----
 
 /// Who a grant is for, as the CLI names them (by name or number). Exactly one of `user`, `group`

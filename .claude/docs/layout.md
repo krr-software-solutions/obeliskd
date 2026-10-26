@@ -74,6 +74,12 @@ Hostnames are unique across every subnet. An ip with hosts can only be deallocat
 `--recursive` (which removes them too), and the same goes for anything containing it. DNS reads a host table (`dns::SharedHosts`) that
 the store swaps after every change, so queries never wait on the store's lock.
 
+`ip resolve --supernet … --subnet … --ip …` is for scripts (`GET /ips/{supernet}/{subnet}/{ip}`,
+open to anyone). It has its own `--format simple|json` (default `simple`: just the address) and
+exit codes: **0** found, **1** not found (the supernet, subnet or ip; `simple` prints nothing, `json`
+prints `null`), **2** any other error, on stderr. Commands that need other formats get their own
+`--format` enum like this one rather than sharing `Output`.
+
 Ip names are unique within their subnet. An ip may carry **one optional `tag`** (`ip alloc --tag
 pr-42`, name rules): a group label, a sort of "sub-sub-net", so a set of ips can be found together
 (`ip list --tag pr-42`) and removed together (`ip dealloc --tag pr-42`). A tag is global: the

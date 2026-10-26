@@ -14,8 +14,8 @@ use super::Peer;
 use super::api::{
     DaemonInfo, Depth, EffectiveNode, ErrorBody, GrantAdd, GrantCheck, GrantCheckQuery, GrantNode,
     GrantQuery, Health, HostAlloc, IpAlloc, IpDealloc, IpDeallocTagged, IpNode, IpQuery,
-    SubnetAlloc, SubnetDealloc, SubnetNode, SubnetQuery, SupernetAlloc, SupernetDealloc,
-    SupernetNode, Who, WhoArg,
+    IpResolved, SubnetAlloc, SubnetDealloc, SubnetNode, SubnetQuery, SupernetAlloc,
+    SupernetDealloc, SupernetNode, Who, WhoArg,
 };
 use crate::model::{Actor, Grant, Host, Hostname, Principal, Scope};
 use crate::model::{Name, Supernet};
@@ -118,7 +118,10 @@ pub fn router(state: AppState) -> Router {
             "/ips",
             get(list_ips).post(alloc_ip).delete(dealloc_ips_tagged),
         )
-        .route("/ips/{supernet}/{subnet}/{ip}", delete(dealloc_ip))
+        .route(
+            "/ips/{supernet}/{subnet}/{ip}",
+            get(get_ip).delete(dealloc_ip),
+        )
         .route("/hosts", get(list_hosts).post(alloc_host))
         .route("/hosts/{host}", delete(dealloc_host))
         .route(
@@ -354,6 +357,26 @@ async fn alloc_ip(
         StatusCode::CREATED,
         Json(ip_path(&state, &request.supernet, &request.subnet, node).await?),
     ))
+}
+
+async fn get_ip(
+    State(state): State<AppState>,
+    names: Result<axum::extract::Path<(Name, Name, Name)>, PathRejection>,
+) -> Result<Json<IpResolved>, ApiError> {
+    let (supernet, subnet, name) = path(names)?;
+    let tree = state.store.tree(Some(&supernet), Some(&subnet)).await?;
+    let parent = &tree[0];
+    let sub = &parent.subnets[0];
+    let ip = sub
+        .ips
+        .iter()
+        .find(|ip| ip.name == name)
+        .ok_or_else(|| ObeliskdError::NotFound(format!("no ip {supernet}/{subnet}/{name}")))?;
+    Ok(Json(IpResolved {
+        supernet: SupernetNode::of(parent, Depth::Supernets),
+        subnet: SubnetNode::of(sub, Depth::Subnets),
+        ip: IpNode::of(ip, Depth::Hosts),
+    }))
 }
 
 async fn dealloc_ip(
@@ -1121,6 +1144,44 @@ mod tests {
         assert_eq!(body["role"], "manage");
         let (status, _) = delete(root(), "/grants?supernet=obd&group=devs").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn one_ip_is_its_path_or_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = || app(dir.path(), ROOT);
+        post_json(
+            root(),
+            "/supernets",
+            serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16" }),
+        )
+        .await;
+        post_json(
+            root(),
+            "/subnets",
+            serde_json::json!({ "supernet": "obd", "name": "a", "kind": "host", "size": 24 }),
+        )
+        .await;
+        for name in ["db", "web"] {
+            post_json(root(), "/ips", serde_json::json!({ "supernet": "obd", "subnet": "a", "name": name, "tag": "pr-42" })).await;
+        }
+
+        // Anyone may look.
+        let (status, body) = get_json(app(dir.path(), USER), "/ips/obd/a/web").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "supernet": { "name": "obd", "cidr": "10.57.0.0/16" },
+                "subnet": { "name": "a", "kind": "host", "cidr": "10.57.0.0/24" },
+                "ip": { "name": "web", "address": "10.57.0.2", "tag": "pr-42", "hosts": [] },
+            }),
+            "side by side, not nested"
+        );
+        for missing in ["/ips/obd/a/nope", "/ips/obd/nope/web", "/ips/nope/a/web"] {
+            let (status, _) = get_json(root(), missing).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+        }
     }
 
     #[tokio::test]
