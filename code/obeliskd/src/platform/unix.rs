@@ -43,6 +43,60 @@ pub fn bind_control(path: &Path) -> Result<UnixListener, ObeliskdError> {
     Ok(listener)
 }
 
+pub fn current_uid() -> u32 {
+    nix::unistd::geteuid().as_raw()
+}
+
+pub fn prepare_state_dir(dir: &Path) -> Result<(), ObeliskdError> {
+    use nix::sys::stat::{Mode, umask};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    let error = |message: String| ObeliskdError::StateDir {
+        path: dir.to_path_buf(),
+        message,
+    };
+
+    umask(Mode::from_bits_truncate(0o077));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| error(format!("couldn't create it: {e}")))?;
+
+    let uid = current_uid();
+    for path in [dir.to_path_buf(), dir.join(crate::state::CONFIG_FILE)] {
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(error(format!("couldn't inspect {}: {e}", path.display()))),
+        };
+        if metadata.uid() != uid {
+            return Err(error(format!(
+                "{} is owned by uid {}, not the daemon's uid {uid}",
+                path.display(),
+                metadata.uid()
+            )));
+        }
+        let mode = metadata.mode() & 0o777;
+        if mode & 0o022 != 0 {
+            return Err(error(format!(
+                "{} is writable by others (mode {mode:o}); fix with chmod go-w",
+                path.display()
+            )));
+        }
+        if mode & 0o077 != 0 {
+            let private = if metadata.is_dir() { 0o700 } else { 0o600 };
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(private))
+                .map_err(|e| error(format!("couldn't tighten {}: {e}", path.display())))?;
+            eprintln!(
+                "obeliskd: {} was readable by others (mode {mode:o}); tightened to {private:o}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Whether `address` can be bound here, i.e. the host owns it.
 pub fn is_local(address: Ipv4Addr) -> bool {
     UdpSocket::bind((address, 0)).is_ok()
@@ -87,7 +141,8 @@ mod tests {
     use super::*;
     use crate::control::api::DaemonInfo;
     use crate::control::client::ControlClient;
-    use crate::control::server::serve;
+    use crate::control::server::{AppState, serve};
+    use crate::state::Store;
     use crate::{Platform, PlatformImpl};
 
     #[tokio::test]
@@ -101,7 +156,11 @@ mod tests {
 
         let listener = bind_control(&socket).unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(serve(listener, daemon, async {
+        let state = AppState {
+            daemon,
+            store: std::sync::Arc::new(Store::load(dir.path()).unwrap()),
+        };
+        let server = tokio::spawn(serve(listener, state, async {
             let _ = stopped.await;
         }));
 
@@ -112,6 +171,27 @@ mod tests {
 
         stop.send(()).unwrap();
         server.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn prepare_state_dir_creates_privately_and_refuses_writable_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("state");
+        prepare_state_dir(&dir).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+
+        // Readable by others: tightened.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        prepare_state_dir(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+
+        // Writable by others: refused.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let error = prepare_state_dir(&dir).unwrap_err();
+        assert!(error.to_string().contains("writable by others"), "{error}");
     }
 
     #[test]

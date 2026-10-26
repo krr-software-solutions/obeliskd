@@ -2,9 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::api::{ErrorBody, Health};
+use super::api::{ErrorBody, Health, SupernetAlloc};
+use crate::model::Supernet;
 use crate::{ObeliskdError, Platform, PlatformImpl};
 
 /// Talks to the daemon over its control socket.
@@ -33,11 +35,41 @@ impl ControlClient {
         self.get("/health").await
     }
 
+    /// `GET /supernets`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or answers with an error.
+    pub async fn supernets(&self) -> Result<Vec<Supernet>, ObeliskdError> {
+        self.get("/supernets").await
+    }
+
+    /// `POST /supernets`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or refuses (e.g. a name taken or an overlap).
+    pub async fn alloc_supernet(&self, request: &SupernetAlloc) -> Result<Supernet, ObeliskdError> {
+        self.post("/supernets", request).await
+    }
+
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ObeliskdError> {
-        // The host is ignored: every request goes to the socket.
-        let response = self
-            .http
-            .get(format!("http://obeliskd{path}"))
+        self.send(self.http.get(url(path))).await
+    }
+
+    async fn post<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ObeliskdError> {
+        self.send(self.http.post(url(path)).json(body)).await
+    }
+
+    async fn send<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<T, ObeliskdError> {
+        let response = request
             .send()
             .await
             .map_err(|source| ObeliskdError::ControlConnect {
@@ -58,4 +90,9 @@ impl ControlClient {
         }
         response.json().await.map_err(ObeliskdError::ControlDecode)
     }
+}
+
+/// The host is ignored: every request goes to the socket.
+fn url(path: &str) -> String {
+    format!("http://obeliskd{path}")
 }

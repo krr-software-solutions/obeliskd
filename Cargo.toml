@@ -20,11 +20,14 @@ obeliskd = { path = "code/obeliskd", version = "=0.0.0" }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
+ipnet = { version = "2", features = ["serde"] }
 jiff = { version = "0.2", features = ["serde"] }
+nix = { version = "0.31", features = ["fs", "user"] }
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+toml = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
 
 # dev

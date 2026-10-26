@@ -1,19 +1,22 @@
-//! Who may call what. Handlers take [`Caller`] (any allowed user) or [`Admin`] (root) as an
-//! argument; the extractor rejects with 403 before the handler runs.
+//! Who may call what. Reads are open to anyone who can connect (no extractor). Handlers that change
+//! things take [`Admin`] (root or the daemon's own uid), or [`Caller`] (any allowed user, once
+//! access can be granted); the extractor rejects with 403 before the handler runs.
 
 use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::request::Parts;
 
 use super::Peer;
 use super::server::{ApiError, ConnInfo};
+use crate::{Platform, PlatformImpl};
 
 /// Root only, for now; granting access to other users comes later.
 fn is_allowed(peer: Peer) -> bool {
     is_admin(peer)
 }
 
+/// Root, or the daemon's own user (so a daemon run as yourself in development is yours to manage).
 fn is_admin(peer: Peer) -> bool {
-    peer.uid == 0
+    peer.uid == 0 || peer.uid == Platform::current_uid()
 }
 
 async fn peer_of<S: Send + Sync>(parts: &mut Parts, state: &S) -> Result<Peer, ApiError> {

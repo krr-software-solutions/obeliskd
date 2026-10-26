@@ -10,11 +10,16 @@ readme.workspace = true
 
 [dependencies]
 axum.workspace = true
+ipnet.workspace = true
 jiff.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+toml.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -46,6 +46,14 @@ impl PlatformImpl for Windows {
         }
     }
 
+    fn prepare_state_dir(_dir: &Path) -> Result<(), ObeliskdError> {
+        todo!("create the state dir with an owner-only ACL")
+    }
+
+    fn current_uid() -> u32 {
+        todo!("Windows has SIDs, not uids")
+    }
+
     fn control_socket_path() -> PathBuf {
         PathBuf::from(r"\\.\pipe\obeliskd")
     }

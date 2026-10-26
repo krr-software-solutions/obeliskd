@@ -28,6 +28,33 @@ pub enum ObeliskdError {
         source: std::io::Error,
     },
 
+    #[error("{0}")]
+    Invalid(String),
+
+    #[error("{0}")]
+    Conflict(String),
+
+    #[error("state dir {}: {message}", path.display())]
+    StateDir { path: PathBuf, message: String },
+
+    #[error("failed to read {}: {source}", path.display())]
+    StateRead {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("failed to parse {} (refusing to start rather than overwrite it): {source}", path.display())]
+    StateParse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+
+    #[error("failed to write {}: {source}", path.display())]
+    StateWrite {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
     #[error("control server failed: {0}")]
     ControlServe(std::io::Error),
 

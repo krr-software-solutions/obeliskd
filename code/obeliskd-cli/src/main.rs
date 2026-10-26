@@ -2,9 +2,15 @@ use std::net::SocketAddrV4;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use ipnet::Ipv4Net;
+use obeliskd::control::api::SupernetAlloc;
 use obeliskd::control::client::ControlClient;
+use obeliskd::model::Name;
 use obeliskd::{ObeliskdError, Platform, PlatformImpl};
+use serde::Serialize;
+
+mod pretty;
 
 //
 
@@ -16,6 +22,7 @@ struct Cli {
     #[arg(
         long,
         global = true,
+        help_heading = SPECIAL,
         env = "OBELISKD_SOCKET",
         default_value_os_t = Platform::control_socket_path()
     )]
@@ -31,6 +38,11 @@ enum Command {
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
+    },
+    /// Supernets: the logical ranges subnets are carved from
+    Supernet {
+        #[command(subcommand)]
+        command: SupernetCommand,
     },
     /// Print a shell completion script
     Completions { shell: clap_complete::Shell },
@@ -48,40 +60,161 @@ enum DaemonCommand {
             default_value_t = Platform::default_dns_address()
         )]
         dns_address: SocketAddrV4,
+        /// Where the daemon keeps its state (config.toml, ...)
+        #[arg(
+            long,
+            env = "OBELISKD_STATE_DIR",
+            default_value_os_t = Platform::state_dir()
+        )]
+        state_dir: PathBuf,
     },
     /// Ask the running daemon how it's doing, and who it sees you as
-    Health,
+    Health {
+        #[command(flatten)]
+        output: Output,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SupernetCommand {
+    /// List every supernet
+    List {
+        #[command(flatten)]
+        output: Output,
+    },
+    /// Create a supernet (root only)
+    Alloc {
+        /// Its name, e.g. `obd`
+        #[arg(long)]
+        supernet: Name,
+        /// Its range, e.g. `10.57.0.0/16`
+        #[arg(long)]
+        cidr: Ipv4Net,
+        #[command(flatten)]
+        output: Output,
+    },
+}
+
+/// How a client command prints the daemon's answer.
+#[derive(Debug, Args)]
+#[command(next_help_heading = EXTRA)]
+struct Output {
+    /// Output format
+    #[arg(long, value_enum, default_value_t = Format::Pretty)]
+    format: Format,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Format {
+    Pretty,
+    Json,
+}
+
+impl Output {
+    fn print<T: Serialize>(&self, value: &T, pretty: impl FnOnce(&T) -> String) {
+        match self.format {
+            Format::Pretty => print!("{}", pretty(value)),
+            Format::Json => {
+                let json = serde_json::to_string_pretty(value).expect("API types serialize");
+                println!("{json}");
+            }
+        }
+    }
 }
 
 //
 
-async fn command_daemon_run(socket: &Path, dns_address: SocketAddrV4) -> Result<(), ObeliskdError> {
-    obeliskd::daemon::run(socket, dns_address).await
+async fn command_daemon_run(
+    socket: &Path,
+    dns_address: SocketAddrV4,
+    state_dir: &Path,
+) -> Result<(), ObeliskdError> {
+    obeliskd::daemon::run(socket, dns_address, state_dir).await
 }
 
-async fn command_daemon_health(socket: &Path) -> Result<(), ObeliskdError> {
+async fn command_daemon_health(socket: &Path, output: &Output) -> Result<(), ObeliskdError> {
     let health = ControlClient::new(socket)?.health().await?;
-    let json = serde_json::to_string_pretty(&health).expect("Health serializes");
-    println!("{json}");
+    output.print(&health, pretty::health);
+    Ok(())
+}
+
+async fn command_supernet_list(socket: &Path, output: &Output) -> Result<(), ObeliskdError> {
+    let supernets = ControlClient::new(socket)?.supernets().await?;
+    output.print(&supernets, |s| pretty::supernets(s));
+    Ok(())
+}
+
+async fn command_supernet_alloc(
+    socket: &Path,
+    name: Name,
+    cidr: Ipv4Net,
+    output: &Output,
+) -> Result<(), ObeliskdError> {
+    let supernet = ControlClient::new(socket)?
+        .alloc_supernet(&SupernetAlloc { name, cidr })
+        .await?;
+    output.print(&supernet, pretty::supernet_allocated);
     Ok(())
 }
 
 fn command_completions(shell: clap_complete::Shell) {
-    let mut cmd = Cli::command();
+    let mut cmd = command();
     let name = cmd.get_name().to_string();
     clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
 }
 
 //
 
+// --help groups options under three headings. Only the exceptions are labelled where they're
+// declared (`--socket`, `Output`); `command()` files everything else.
+
+/// What this command is about.
+const CORE: &str = "Core Options";
+/// Presentation and tweaks shared by many commands.
+const EXTRA: &str = "Extra Options";
+/// Plumbing present on every command.
+const SPECIAL: &str = "Special Options";
+
+/// The CLI definition with headings applied: anything unlabelled is Core, and the built-in
+/// `--help` / `--version` are Special.
+fn command() -> clap::Command {
+    fn apply(cmd: clap::Command) -> clap::Command {
+        cmd.mut_args(|arg| {
+            if arg.get_help_heading().is_some() {
+                arg
+            } else if matches!(arg.get_id().as_str(), "help" | "version") {
+                arg.help_heading(SPECIAL)
+            } else {
+                arg.help_heading(CORE)
+            }
+        })
+        .mut_subcommands(apply)
+    }
+    // Built first so the auto-generated --help/--version exist for `apply` to move.
+    let mut cmd = Cli::command();
+    cmd.build();
+    apply(cmd)
+}
+
 async fn main_impl() -> Result<(), ObeliskdError> {
-    let cli: Cli = Cli::parse();
+    let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
     let socket: PathBuf = cli.socket;
 
     match cli.command {
         Command::Daemon { command } => match command {
-            DaemonCommand::Run { dns_address } => command_daemon_run(&socket, dns_address).await,
-            DaemonCommand::Health => command_daemon_health(&socket).await,
+            DaemonCommand::Run {
+                dns_address,
+                state_dir,
+            } => command_daemon_run(&socket, dns_address, &state_dir).await,
+            DaemonCommand::Health { output } => command_daemon_health(&socket, &output).await,
+        },
+        Command::Supernet { command } => match command {
+            SupernetCommand::List { output } => command_supernet_list(&socket, &output).await,
+            SupernetCommand::Alloc {
+                supernet,
+                cidr,
+                output,
+            } => command_supernet_alloc(&socket, supernet, cidr, &output).await,
         },
         Command::Completions { shell } => {
             command_completions(shell);

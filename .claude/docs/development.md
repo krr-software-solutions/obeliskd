@@ -3,9 +3,12 @@
 ## Commands
 
 ```sh
-cargo run -p obeliskd-cli -- --socket /tmp/o.sock daemon run     # run the daemon, no root needed
-#   add --dns-address 127.0.0.79:5379 to stay off port 53, which needs root.
-#   Not 5353: that's mDNS, and avahi/browsers already hold 0.0.0.0:5353.
+cargo run -p obeliskd-cli -- --socket /tmp/o.sock daemon run --state-dir /tmp/obd-state --dns-address 127.0.0.79:5379
+                                                              # run the daemon as yourself (no root)
+cargo run -p obeliskd-cli -- --socket /tmp/o.sock supernet alloc --supernet obd --cidr 10.57.0.0/16
+cargo run -p obeliskd-cli -- --socket /tmp/o.sock supernet list --format json
+#   port 5379, not 53 (needs root) or 5353 (mDNS, already held by avahi/browsers).
+#   --state-dir and --dns-address are `daemon run` flags; clients only ever need --socket.
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock daemon health  # call it
 cargo run -p obeliskd-cli -- completions zsh                 # shell completions
 cargo fmt --all                                              # format

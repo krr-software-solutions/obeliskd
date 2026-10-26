@@ -52,6 +52,14 @@ impl PlatformImpl for MacOs {
         }
     }
 
+    fn prepare_state_dir(dir: &Path) -> Result<(), ObeliskdError> {
+        unix::prepare_state_dir(dir)
+    }
+
+    fn current_uid() -> u32 {
+        unix::current_uid()
+    }
+
     fn control_socket_path() -> PathBuf {
         PathBuf::from("/var/run/obeliskd/obeliskd.sock")
     }

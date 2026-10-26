@@ -6,9 +6,10 @@ understanding the wire format over pulling in a DNS framework.
 
 ## Current state
 
-`obeliskd daemon run` answers DNS for `*.obd.internal` over UDP (every name answers with a placeholder
-address), and serves the control API on its socket (just `GET /health` so far, which
-`obeliskd daemon health` calls). There are no rules yet, no TCP, no IPv6, and no OS routing setup.
+`obeliskd daemon run` answers DNS for `*.obd.internal` over UDP (every name answers with a
+placeholder address), and serves the control API on its socket: `GET /health` and supernets
+(`obeliskd supernet list`/`alloc`). There are no subnets, ips or records yet; no TCP, no IPv6, no OS
+routing setup.
 
 ## The zone and its answers (`code/obeliskd/src/dns/`)
 
@@ -60,8 +61,15 @@ Every setting, rule, and cert changes through the `obeliskd` CLI, which talks to
 control socket. Nothing is a hand-edited file, so there is no `/etc/obeliskd`. Don't add one, and
 don't add flags or files that expect a person to edit config.
 
-- **State dir** (`PlatformImpl::state_dir()`): everything that persists, owned by the daemon.
-  Linux `/var/lib/obeliskd`, macOS `/Library/Application Support/obeliskd`.
+- **State dir** (`PlatformImpl::state_dir()`, or `daemon run --state-dir`): everything that
+  persists, owned by the daemon. Linux `/var/lib/obeliskd`, macOS
+  `/Library/Application Support/obeliskd`. Daemon-only: the dir is `0700`, files `0600`, and the
+  daemon runs with umask `077`. At startup it refuses a dir or `config.toml` owned by another uid
+  or writable by others, and tightens ones that are merely readable. Nobody reads these files
+  directly; every read and write goes through the API.
+- **`config.toml`** (in the state dir): the persisted model, so far just `supernets[]`. Written
+  atomically (temp file, fsync, rename). A file that won't parse stops the daemon from starting,
+  rather than being overwritten.
 - **Control socket:** one socket. The daemon checks the caller's kernel-verified uid
   (`peer_cred()`) before reading anything. Access starts root-only (so `sudo` works) and is widened
   through the CLI.

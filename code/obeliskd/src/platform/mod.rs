@@ -42,6 +42,20 @@ pub trait PlatformImpl {
     /// [`ObeliskdError::LocalAddress`] if it isn't local and can't be made so.
     fn ensure_local_address(address: Ipv4Addr) -> Result<(), ObeliskdError>;
 
+    /// Prepares the state dir before anything is read from it: creates it (`0700`) if missing,
+    /// makes everything the daemon creates from now on private (umask `077`), and checks that the
+    /// dir and its config are owned by the daemon's user and not writable by anyone else
+    /// (tightening them, with a warning, if they're merely readable by others).
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::StateDir`] if it can't be created, or fails the checks.
+    fn prepare_state_dir(dir: &Path) -> Result<(), ObeliskdError>;
+
+    /// The daemon's own (effective) user id. Callers with it are trusted like root, so a daemon
+    /// run as yourself (in development) can be managed by yourself.
+    fn current_uid() -> u32;
+
     /// Where the daemon listens for control connections, unless told otherwise.
     fn control_socket_path() -> PathBuf;
 

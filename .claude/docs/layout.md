@@ -18,6 +18,18 @@ socket, and serves both until the shutdown signal.
   pure function from packet to packet, which is what the tests target) and the UDP loop.
 - The control API lives in `control/`.
 
+## The model and its state
+
+- `model/`: the allocation model and its validation. `Name` follows the hostname-label rules
+  (lowercase LDH, at most 63 characters, no `--` in positions 3–4), so a name works as a DNS label,
+  a docker network name and a k8s name. `Supernet` is a name plus an IPv4 CIDR; it must be the
+  start of its range and must not overlap another supernet.
+- `state.rs`: `Store`, which holds `config.toml` loaded in memory behind a mutex. Every change is
+  validated, saved atomically, and only then made visible.
+
+The tree is supernet → subnet → ip; only supernets exist so far. Subnets will carry the
+kind (`host` | `docker`).
+
 ## The control API (`code/obeliskd/src/control/`)
 
 HTTP over the control socket: the daemon serves it with axum, and the CLI calls it with reqwest.
@@ -30,13 +42,27 @@ HTTP over the control socket: the daemon serves it with axum, and the CLI calls 
   extractor:
   - `Caller`: any user allowed on the socket;
   - `Admin`: root;
-  - neither: anyone who can connect (e.g. `/health`).
+  - neither: anyone who can connect. **All reads work this way** (`/health`, `GET /supernets`):
+    nothing obeliskd holds is secret, and needing `sudo` just to look would be friction. Every
+    change needs `Admin` (or `Caller`, once access grants exist).
 
-  Requests are parsed first and then rejected with 403. That's intended: there's no
+  Admin means root **or the daemon's own uid**, so a daemon run as yourself in development is yours
+  to manage. Requests are parsed first and then rejected with 403. That's intended: there's no
   check-before-read.
 
 To add an endpoint, add its types to `api.rs`, a handler and route in `server.rs`, and a method in
-`client.rs`. Test handlers with `MockConnectInfo` (see `server.rs`'s tests).
+`client.rs`. Domain errors map to statuses in `From<ObeliskdError> for ApiError`: `Invalid` → 400,
+`Conflict` → 409, everything else 500.
+
+Every CLI command that talks to the daemon takes `--format pretty|json` (default `pretty`). JSON is
+the API type as-is, and pretty-printing lives in `obeliskd-cli/src/pretty.rs`.
+
+`--help` groups options under three headings: **Core Options** (what the command is about),
+**Extra Options** (presentation shared by many commands, e.g. `--format`) and **Special Options**
+(plumbing on every command: `--socket`, `--help`, `--version`). `command()` in `main.rs` files
+every unlabelled option under Core and moves `--help`/`--version` to Special. Only exceptions need
+a label: `help_heading = SPECIAL` on an arg, or `#[command(next_help_heading = EXTRA)]` on a
+flattened struct. Test handlers with `MockConnectInfo` (see `server.rs`'s tests).
 
 ## The CLI entry point
 
