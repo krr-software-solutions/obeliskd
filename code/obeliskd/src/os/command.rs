@@ -32,6 +32,29 @@ pub fn run(program: &str, args: &[String]) -> Result<Output, ObeliskdError> {
     })
 }
 
+/// Runs `program args…` on this terminal (its output isn't captured), e.g. a log viewer.
+///
+/// # Errors
+///
+/// [`ObeliskdError::Os`] if it can't be started, or exits with a failure.
+pub fn run_attached(program: &str, args: &[String]) -> Result<(), ObeliskdError> {
+    let status = Command::new(program)
+        .args(args)
+        .status()
+        .map_err(|e| ObeliskdError::Os {
+            command: describe(program, args),
+            message: format!("couldn't run it: {e}"),
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(ObeliskdError::Os {
+            command: describe(program, args),
+            message: format!("exited with {status}"),
+        })
+    }
+}
+
 /// Runs it and requires success, treating stderr containing any of `ok_if` as success too (e.g.
 /// "already gone" for a removal).
 ///

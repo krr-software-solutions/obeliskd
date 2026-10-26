@@ -9,10 +9,12 @@ use obeliskd::control::api::{
     SubnetAlloc, SubnetDealloc, SubnetQuery, SupernetAlloc, SupernetDealloc, WhoArg,
 };
 use obeliskd::control::client::ControlClient;
+use obeliskd::manage::{DaemonSettings, ServiceAction};
 use obeliskd::model::{Hostname, Name, Role, SubnetKind};
 use obeliskd::{ObeliskdError, Platform, PlatformImpl};
 use serde::Serialize;
 
+mod manage;
 mod pretty;
 mod status;
 
@@ -68,6 +70,11 @@ enum Command {
         #[command(subcommand)]
         command: GrantCommand,
     },
+    /// Run obeliskd as a system service: install, start at boot, logs, status
+    Manage {
+        #[command(subcommand)]
+        command: ManageCommand,
+    },
     /// Print a shell completion script
     Completions { shell: clap_complete::Shell },
 }
@@ -76,30 +83,37 @@ enum Command {
 enum DaemonCommand {
     /// Run the daemon in the foreground, serving the control socket
     Run {
-        /// Where to answer DNS
-        #[arg(
-            long,
-            value_name = "IPV4:PORT",
-            env = "OBELISKD_DNS_ADDRESS",
-            default_value_t = Platform::default_dns_address()
-        )]
-        dns_address: SocketAddrV4,
-        /// Where the daemon keeps its state (config.toml, ...)
-        #[arg(
-            long,
-            env = "OBELISKD_STATE_DIR",
-            default_value_os_t = Platform::state_dir()
-        )]
-        state_dir: PathBuf,
-        /// What to log: a level (`info`, `debug`, …) or a filter like `info,obeliskd::dns=warn`
-        #[arg(long, env = "OBELISKD_LOG", default_value = "info")]
-        log_level: String,
+        #[command(flatten)]
+        settings: DaemonArgs,
     },
     /// Ask the running daemon how it's doing, and who it sees you as
     Health {
         #[command(flatten)]
         output: Output,
     },
+}
+
+/// How the daemon runs: `daemon run`'s flags, and what `manage install` bakes into the service.
+#[derive(Debug, Args)]
+struct DaemonArgs {
+    /// Where to answer DNS
+    #[arg(
+        long,
+        value_name = "IPV4:PORT",
+        env = "OBELISKD_DNS_ADDRESS",
+        default_value_t = Platform::default_dns_address()
+    )]
+    dns_address: SocketAddrV4,
+    /// Where the daemon keeps its state (config.toml, ...)
+    #[arg(
+        long,
+        env = "OBELISKD_STATE_DIR",
+        default_value_os_t = Platform::state_dir()
+    )]
+    state_dir: PathBuf,
+    /// What to log: a level (`info`, `debug`, …) or a filter like `info,obeliskd::dns=warn`
+    #[arg(long, env = "OBELISKD_LOG", default_value = "info")]
+    log_level: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -423,6 +437,72 @@ impl From<RoleArg> for Role {
     }
 }
 
+#[derive(Debug, Subcommand)]
+enum ManageCommand {
+    /// Install the binary and the service (systemd / launchd), start it now and at every boot
+    /// (root only; re-run to upgrade or change settings)
+    Install {
+        #[command(flatten)]
+        settings: DaemonArgs,
+    },
+    /// Stop and remove the service and the installed binary; state stays unless --purge (root only)
+    Uninstall {
+        /// Also remove every allocation (routes, docker networks) and the state dir. Needs the
+        /// daemon running.
+        #[arg(long)]
+        purge: bool,
+        /// The state dir --purge deletes
+        #[arg(
+            long,
+            env = "OBELISKD_STATE_DIR",
+            default_value_os_t = Platform::state_dir()
+        )]
+        state_dir: PathBuf,
+    },
+    /// Is it installed, enabled, running, answering, and resolving through the system resolver?
+    Status,
+    /// Start the service now (root only)
+    Start,
+    /// Stop the service now; it still starts at the next boot if enabled (root only)
+    Stop,
+    /// Restart the service (root only)
+    Restart,
+    /// Start the service at every boot (root only; doesn't start it now)
+    Enable,
+    /// Don't start the service at boot (root only; doesn't stop it now)
+    Disable,
+    /// Show the service's log
+    Logs {
+        /// Keep showing new lines as they come
+        #[arg(long, short)]
+        follow: bool,
+    },
+}
+
+async fn run_manage(socket: &Path, command: ManageCommand) -> Result<(), ObeliskdError> {
+    match command {
+        ManageCommand::Install { settings } => {
+            let settings = DaemonSettings {
+                socket: socket.to_path_buf(),
+                dns_address: settings.dns_address,
+                state_dir: settings.state_dir,
+                log_level: settings.log_level,
+            };
+            manage::install(&settings).await
+        }
+        ManageCommand::Uninstall { purge, state_dir } => {
+            manage::uninstall(socket, purge.then_some(state_dir.as_path())).await
+        }
+        ManageCommand::Status => manage::status(socket).await,
+        ManageCommand::Start => manage::control(socket, ServiceAction::Start).await,
+        ManageCommand::Stop => manage::control(socket, ServiceAction::Stop).await,
+        ManageCommand::Restart => manage::control(socket, ServiceAction::Restart).await,
+        ManageCommand::Enable => manage::control(socket, ServiceAction::Enable).await,
+        ManageCommand::Disable => manage::control(socket, ServiceAction::Disable).await,
+        ManageCommand::Logs { follow } => Platform::show_logs(follow),
+    }
+}
+
 /// `--kind`: what a subnet's addresses are for.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum KindArg {
@@ -698,13 +778,9 @@ fn command() -> clap::Command {
 
 async fn run_daemon(socket: &Path, command: DaemonCommand) -> Result<(), ObeliskdError> {
     match command {
-        DaemonCommand::Run {
-            dns_address,
-            state_dir,
-            log_level,
-        } => {
-            init_logging(&log_level)?;
-            command_daemon_run(socket, dns_address, &state_dir).await
+        DaemonCommand::Run { settings } => {
+            init_logging(&settings.log_level)?;
+            command_daemon_run(socket, settings.dns_address, &settings.state_dir).await
         }
         DaemonCommand::Health { output } => command_daemon_health(socket, &output).await,
     }
@@ -1026,6 +1102,7 @@ async fn main_impl() -> Result<ExitCode, ObeliskdError> {
         Command::Ip { command } => run_ip(&socket, command).await,
         Command::Host { command } => run_host(&socket, command).await,
         Command::Grant { command } => run_grant(&socket, command).await,
+        Command::Manage { command } => run_manage(&socket, command).await,
         Command::Completions { shell } => {
             command_completions(shell);
             Ok(())

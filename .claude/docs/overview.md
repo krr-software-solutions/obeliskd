@@ -20,7 +20,9 @@ An ip in a host subnet is usable as soon as it's allocated: on Linux the subnet'
 covers it, and on macOS it gets a `/32` lo0 alias. An ip in a docker subnet is a reservation that a
 container (`--ip`) or a MetalLB-pinned Service claims.
 
-The daemon **requires root**, and re-applies all of this at every start. There's no TCP, no IPv6, and no DNS routing setup (`~obd.internal`).
+The daemon **requires root**, and re-applies all of this at every start, including **DNS routing**:
+the system resolver sends `~obd.internal` (and only that) to the daemon, so ordinary programs
+resolve its hosts. There's no TCP and no IPv6 yet.
 
 ## The zone and its answers (`code/obeliskd/src/dns/`)
 
@@ -52,15 +54,33 @@ The wire format is hand-rolled (`dns/wire.rs`, RFC 1035): just enough to read on
 write one answer. Queries carrying EDNS (systemd-resolved sends them) are answered without an OPT
 record, which RFC 6891 allows.
 
-To route the zone to obeliskd on Linux (by hand for now; `obeliskd install` should do it later):
+**DNS routing** (`PlatformImpl::ensure_dns_routing`) is set up by the daemon at every start and
+removed at a clean stop: runtime state, like routes.
+- **Linux:** a dummy link `obd0` carrying the DNS address (`scope global`: resolved ignores links
+  without a routable address), and systemd-resolved told `dns obd0 <address>`,
+  `domain obd0 ~obd.internal`, `default-route obd0 false`. So the zone, and only the zone, goes to
+  the daemon. No systemd-networkd needed. Without systemd-resolved it logs a warning and skips it.
+- **macOS:** `/etc/resolver/obd.internal`.
 
-```sh
-sudo ip link add obd0 type dummy && sudo ip link set obd0 up
-sudo resolvectl dns obd0 127.0.0.79:53
-sudo resolvectl domain obd0 '~obd.internal'
-sudo resolvectl default-route obd0 false
-resolvectl query anything.obd.internal
-```
+Check it with `obeliskd manage status`, which resolves a real host through the system resolver.
+
+## Running as a service (`obeliskd manage …`, `obeliskd-cli/src/manage.rs`)
+
+- `install`: copies the binary to `/usr/local/bin/obeliskd`, writes the service with the
+  `daemon run` flags baked in, and enables and starts it (re-run to upgrade or change settings).
+  On Linux that's the systemd unit `/etc/systemd/system/obeliskd.service` (`WantedBy=multi-user.target`,
+  `Restart=on-failure`). On macOS it's a launchd plist in `/Library/LaunchDaemons`, where
+  `KeepAlive` only restarts it after a failure, so a clean stop stays stopped, as on Linux.
+- `uninstall [--purge]`: removes the service, the binary and DNS routing, and keeps the state.
+  `--purge` first deallocates everything through the daemon, then deletes the state dir.
+- `start` / `stop` / `restart` / `enable` / `disable`: the service manager's own verbs. `stop`
+  doesn't disable it; `disable` doesn't stop it.
+- `status`: installed / enabled / running, the installed version, whether the daemon answers, and
+  whether DNS works through the system resolver.
+- `logs [--follow]`: `journalctl -u obeliskd` on Linux, and the log file `/var/log/obeliskd.log` on macOS.
+
+The files written (the unit, the plist, `/etc/resolver/obd.internal`) come from plain functions in
+`obeliskd::manage`, and so are tested on any OS.
 
 ## Open design questions
 
@@ -69,7 +89,6 @@ Nothing below is decided. Don't silently pick an answer in code; raise it.
 - Rule format and storage (in-memory with live edits, persisted in the state dir).
 - When to add TCP (needed once an answer can be truncated) and IPv6 (AAAA answers, `[::]` listening).
 - Cert helpers in v1? Name-constrained local CA vs ACME DNS-01 on an owned domain.
-- How `obeliskd install` sets up OS routing (leaning: it does it itself, via `PlatformImpl`).
 
 Settled so far:
 - **Answer-only**, behind an OS routing domain (no forwarding).

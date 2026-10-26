@@ -13,6 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use super::PlatformImpl;
 use crate::ObeliskdError;
 use crate::control::Peer;
+use crate::manage::{DnsRouting, ServiceAction, ServiceState};
 
 pub struct Windows;
 
@@ -94,6 +95,38 @@ impl PlatformImpl for Windows {
 
     fn groups_of(_uid: u32) -> Vec<u32> {
         todo!("groups on Windows (SIDs)")
+    }
+
+    fn ensure_dns_routing(_dns: SocketAddrV4) -> Result<DnsRouting, ObeliskdError> {
+        todo!("NRPT rules for the zone on Windows")
+    }
+
+    fn remove_dns_routing() -> Result<(), ObeliskdError> {
+        todo!("NRPT rules for the zone on Windows")
+    }
+
+    fn service_file() -> PathBuf {
+        todo!("a Windows service")
+    }
+
+    fn install_service(_command: &[String]) -> Result<(), ObeliskdError> {
+        todo!("a Windows service")
+    }
+
+    fn remove_service() -> Result<(), ObeliskdError> {
+        todo!("a Windows service")
+    }
+
+    fn control_service(_action: ServiceAction) -> Result<(), ObeliskdError> {
+        todo!("a Windows service")
+    }
+
+    fn service_state() -> ServiceState {
+        todo!("a Windows service")
+    }
+
+    fn show_logs(_follow: bool) -> Result<(), ObeliskdError> {
+        todo!("a Windows service")
     }
 
     fn control_socket_path() -> PathBuf {

@@ -9,7 +9,28 @@ use tokio::net::{UnixListener, UnixStream};
 use super::{PlatformImpl, unix};
 use crate::ObeliskdError;
 use crate::control::Peer;
+use crate::dns::ZONE;
+use crate::manage::{self, DnsRouting, ServiceAction, ServiceState};
 use crate::os::command;
+
+const LAUNCHCTL: &str = "launchctl";
+const PLIST_PATH: &str = "/Library/LaunchDaemons/com.krr-software-solutions.obeliskd.plist";
+const LOG_PATH: &str = "/var/log/obeliskd.log";
+const RESOLVER_DIR: &str = "/etc/resolver";
+
+/// `system/<label>`: the service, to launchctl.
+fn target() -> String {
+    format!("system/{}", manage::LAUNCHD_LABEL)
+}
+
+fn launchctl(args: &[&str]) -> Result<(), ObeliskdError> {
+    command::run_ok(LAUNCHCTL, &command::args(args), &[])
+}
+
+/// Whether launchd has it loaded (bootstrapped).
+fn loaded() -> bool {
+    command::run(LAUNCHCTL, &command::args(&["print", &target()])).is_ok_and(|o| o.success)
+}
 
 pub struct MacOs;
 
@@ -137,6 +158,105 @@ impl PlatformImpl for MacOs {
                 vec![primary]
             }
         }
+    }
+
+    fn ensure_dns_routing(dns: SocketAddrV4) -> Result<DnsRouting, ObeliskdError> {
+        let dir = Path::new(RESOLVER_DIR);
+        std::fs::create_dir_all(dir).map_err(|source| ObeliskdError::StateWrite {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = dir.join(ZONE);
+        std::fs::write(&path, manage::resolver_file(dns)).map_err(|source| {
+            ObeliskdError::StateWrite {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        Ok(DnsRouting::Configured(format!(
+            "{} sends {ZONE} to {dns}",
+            path.display()
+        )))
+    }
+
+    fn remove_dns_routing() -> Result<(), ObeliskdError> {
+        let path = Path::new(RESOLVER_DIR).join(ZONE);
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(ObeliskdError::StateWrite { path, source: e })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn service_file() -> PathBuf {
+        PathBuf::from(PLIST_PATH)
+    }
+
+    fn install_service(service_command: &[String]) -> Result<(), ObeliskdError> {
+        let plist = manage::launchd_plist(service_command, Path::new(LOG_PATH));
+        std::fs::write(PLIST_PATH, plist).map_err(|source| ObeliskdError::StateWrite {
+            path: PathBuf::from(PLIST_PATH),
+            source,
+        })?;
+        // Reload it, so a changed plist (or an upgraded binary) takes effect.
+        let _ = launchctl(&["bootout", &target()]);
+        launchctl(&["enable", &target()])?;
+        launchctl(&["bootstrap", "system", PLIST_PATH])
+    }
+
+    fn remove_service() -> Result<(), ObeliskdError> {
+        if !Path::new(PLIST_PATH).exists() {
+            return Ok(());
+        }
+        let _ = launchctl(&["bootout", &target()]);
+        std::fs::remove_file(PLIST_PATH).map_err(|source| ObeliskdError::StateWrite {
+            path: PathBuf::from(PLIST_PATH),
+            source,
+        })
+    }
+
+    fn control_service(action: ServiceAction) -> Result<(), ObeliskdError> {
+        let target = target();
+        match action {
+            // Not loaded (never bootstrapped since boot, e.g. disabled at the time): load it.
+            ServiceAction::Start if !loaded() => launchctl(&["bootstrap", "system", PLIST_PATH]),
+            ServiceAction::Start => launchctl(&["kickstart", &target]),
+            // A clean exit isn't restarted (KeepAlive is only for failures).
+            ServiceAction::Stop => launchctl(&["kill", "TERM", &target]),
+            ServiceAction::Restart => launchctl(&["kickstart", "-k", &target]),
+            ServiceAction::Enable => launchctl(&["enable", &target]),
+            ServiceAction::Disable => launchctl(&["disable", &target]),
+        }
+    }
+
+    fn service_state() -> ServiceState {
+        let print = command::run(LAUNCHCTL, &command::args(&["print", &target()]));
+        let running = print
+            .as_ref()
+            .is_ok_and(|o| o.success && o.stdout.contains("state = running"));
+        let disabled = command::run(LAUNCHCTL, &command::args(&["print-disabled", "system"]))
+            .is_ok_and(|o| {
+                o.stdout.lines().any(|l| {
+                    l.contains(&format!("\"{}\"", manage::LAUNCHD_LABEL))
+                        && (l.contains("=> disabled") || l.contains("=> true"))
+                })
+            });
+        let installed = Path::new(PLIST_PATH).exists();
+        ServiceState {
+            installed,
+            enabled: installed && !disabled,
+            running,
+        }
+    }
+
+    fn show_logs(follow: bool) -> Result<(), ObeliskdError> {
+        let mut args = command::args(&["-n", "200"]);
+        if follow {
+            args.push("-f".to_string());
+        }
+        args.push(LOG_PATH.to_string());
+        command::run_attached("tail", &args)
     }
 
     fn control_socket_path() -> PathBuf {

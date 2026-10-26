@@ -2,6 +2,7 @@ pub mod control;
 pub mod daemon;
 pub mod dns;
 pub mod error;
+pub mod manage;
 pub mod model;
 pub mod os;
 pub mod platform;

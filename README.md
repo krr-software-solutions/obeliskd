@@ -28,4 +28,12 @@ sudo ./target/debug/obeliskd daemon run      # needs root: it manages routes and
 cargo test --workspace
 ```
 
+## Installing
+
+```sh
+cargo build --release
+sudo ./target/release/obeliskd manage install   # /usr/local/bin/obeliskd + a systemd/launchd service, started now and at boot
+obeliskd manage status                          # installed, running, and resolving through the system resolver?
+```
+
 Requires Rust 1.85+ (edition 2024).

@@ -14,6 +14,7 @@ use axum::serve::Listener;
 
 use crate::ObeliskdError;
 use crate::control::Peer;
+use crate::manage::{DnsRouting, ServiceAction, ServiceState};
 
 /// What each OS has to provide.
 ///
@@ -112,6 +113,59 @@ pub trait PlatformImpl {
     /// credentials: joining a group counts right away, without logging in again. Empty for a uid
     /// with no account.
     fn groups_of(uid: u32) -> Vec<u32>;
+
+    /// Points the system's resolver at the daemon for its zone (`~obd.internal` only, never as a
+    /// default), so ordinary programs resolve its hostnames. Runtime state, set up at every daemon
+    /// start like routes. Linux: a dummy link (`obd0`) carrying the DNS address, with
+    /// systemd-resolved told to send the zone there; macOS: `/etc/resolver/obd.internal`.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::Os`] (or a write error) if setting it up fails; a system that can't do it
+    /// at all (no systemd-resolved) is [`DnsRouting::Unavailable`] instead.
+    fn ensure_dns_routing(dns: SocketAddrV4) -> Result<DnsRouting, ObeliskdError>;
+
+    /// Undoes [`ensure_dns_routing`](Self::ensure_dns_routing). Already gone is fine.
+    ///
+    /// # Errors
+    ///
+    /// If the OS refuses.
+    fn remove_dns_routing() -> Result<(), ObeliskdError>;
+
+    /// Where the service's definition lives (the systemd unit, or the launchd plist).
+    fn service_file() -> PathBuf;
+
+    /// Writes the service to run `command`, registers it to start at boot, and starts it
+    /// (restarting it if it was already running, e.g. after an upgrade).
+    ///
+    /// # Errors
+    ///
+    /// If the file can't be written or the service manager refuses.
+    fn install_service(command: &[String]) -> Result<(), ObeliskdError>;
+
+    /// Stops the service, unregisters it, and removes its file. Not installed is fine.
+    ///
+    /// # Errors
+    ///
+    /// If the service manager refuses or the file can't be removed.
+    fn remove_service() -> Result<(), ObeliskdError>;
+
+    /// Asks the service manager to start, stop, restart, enable or disable the service.
+    ///
+    /// # Errors
+    ///
+    /// If the service manager refuses (e.g. it isn't installed).
+    fn control_service(action: ServiceAction) -> Result<(), ObeliskdError>;
+
+    /// What the service manager says about the service.
+    fn service_state() -> ServiceState;
+
+    /// Shows the service's log on this terminal (following it with `follow`).
+    ///
+    /// # Errors
+    ///
+    /// If the log can't be shown.
+    fn show_logs(follow: bool) -> Result<(), ObeliskdError>;
 
     /// Where the daemon listens for control connections, unless told otherwise.
     fn control_socket_path() -> PathBuf;

@@ -46,6 +46,9 @@ pub enum ObeliskdError {
     #[error("obeliskd daemon run needs root: it changes routes and docker networks (try sudo)")]
     NeedsRoot,
 
+    #[error("{0} needs root (try sudo)")]
+    NeedsRootFor(String),
+
     #[error("state dir {}: {message}", path.display())]
     StateDir { path: PathBuf, message: String },
 

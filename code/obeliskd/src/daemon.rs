@@ -9,6 +9,7 @@ use tracing::{info, warn};
 
 use crate::control::api::DaemonInfo;
 use crate::control::server::AppState;
+use crate::manage::DnsRouting;
 use crate::os::SystemOs;
 use crate::state::Store;
 use crate::users::SystemUsers;
@@ -67,6 +68,17 @@ pub async fn run(
         dns_address,
     };
     info!(address = %dns_address, zone = dns::ZONE, "answering DNS (UDP)");
+    // Now that it answers: point the system's resolver at it for the zone. Not fatal: `dig @…`
+    // still works without it.
+    match Platform::ensure_dns_routing(dns_address) {
+        Ok(DnsRouting::Configured(how)) => info!("DNS routing: {how}"),
+        Ok(DnsRouting::Unavailable(why)) => {
+            warn!(
+                "no DNS routing ({why}): only queries sent to {dns_address} directly are answered"
+            );
+        }
+        Err(error) => warn!(%error, "couldn't set up DNS routing"),
+    }
     info!(socket = %socket.display(), "serving the control API");
     info!("ready");
 
@@ -78,6 +90,9 @@ pub async fn run(
         () = dns::serve(dns_socket, hosts) => unreachable!("DNS serves until dropped"),
     };
     info!("shutting down");
+    if let Err(error) = Platform::remove_dns_routing() {
+        warn!(%error, "couldn't remove DNS routing");
+    }
     Platform::unbind_control(socket);
     info!("stopped");
     result
