@@ -1,7 +1,8 @@
 //! The daemon's side of the control API.
 
 use axum::extract::connect_info::Connected;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
@@ -11,13 +12,13 @@ use std::sync::Arc;
 
 use super::Peer;
 use super::api::{
-    DaemonInfo, ErrorBody, Health, HostAlloc, HostEntry, IpAlloc, IpEntry, IpQuery, SubnetAlloc,
-    SubnetDealloc, SubnetEntry, SubnetQuery, SupernetAlloc, SupernetDealloc,
+    DaemonInfo, Depth, ErrorBody, Health, HostAlloc, IpAlloc, IpNode, IpQuery, SubnetAlloc,
+    SubnetDealloc, SubnetNode, SubnetQuery, SupernetAlloc, SupernetDealloc, SupernetNode,
 };
 use super::auth::Admin;
 use crate::model::{Host, Hostname};
 use crate::model::{Name, Supernet};
-use crate::state::{HostIn, IpIn, Store};
+use crate::state::{HostIn, Store};
 use crate::{ObeliskdError, Platform, PlatformImpl};
 
 /// Per-connection info, captured once when the connection is accepted.
@@ -129,43 +130,116 @@ async fn health(
 }
 
 /// Reads are open to anyone who can connect; changes need [`Admin`].
-async fn list_supernets(State(state): State<AppState>) -> Json<Vec<Supernet>> {
-    Json(state.store.supernets().await)
+fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
+    body.map(|Json(b)| b)
+        .map_err(|e| ApiError::bad_request(e.body_text()))
+}
+
+fn query<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
+    query
+        .map(|Query(q)| q)
+        .map_err(|e| ApiError::bad_request(e.body_text()))
+}
+
+fn path<T>(path: Result<axum::extract::Path<T>, PathRejection>) -> Result<T, ApiError> {
+    path.map(|axum::extract::Path(p)| p)
+        .map_err(|e| ApiError::bad_request(e.body_text()))
+}
+
+/// A tree, down to `depth`.
+fn nodes(tree: &[Supernet], depth: Depth) -> Vec<SupernetNode> {
+    tree.iter().map(|s| SupernetNode::of(s, depth)).collect()
+}
+
+/// The path to a subnet (as `node`) in `supernet`, read back from the store.
+async fn subnet_path(
+    state: &AppState,
+    supernet: &Name,
+    node: SubnetNode,
+) -> Result<SupernetNode, ApiError> {
+    let parent = state
+        .store
+        .supernet(supernet)
+        .await
+        .ok_or_else(|| ApiError::internal(format!("supernet {supernet} vanished")))?;
+    Ok(SupernetNode::path(&parent, node))
+}
+
+/// The path to an ip (as `node`) in `supernet`/`subnet`, read back from the store.
+async fn ip_path(
+    state: &AppState,
+    supernet: &Name,
+    subnet: &Name,
+    node: IpNode,
+) -> Result<SupernetNode, ApiError> {
+    let parent = state
+        .store
+        .supernet(supernet)
+        .await
+        .ok_or_else(|| ApiError::internal(format!("supernet {supernet} vanished")))?;
+    let sub = parent
+        .subnets
+        .iter()
+        .find(|s| &s.name == subnet)
+        .ok_or_else(|| ApiError::internal(format!("subnet {supernet}/{subnet} vanished")))?;
+    Ok(SupernetNode::path(&parent, SubnetNode::path(sub, node)))
+}
+
+//
+
+async fn list_supernets(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<SupernetNode>>, ApiError> {
+    let tree = state.store.tree(None, None).await?;
+    Ok(Json(nodes(&tree, Depth::Supernets)))
 }
 
 async fn alloc_supernet(
     _: Admin,
     State(state): State<AppState>,
-    request: Result<Json<SupernetAlloc>, axum::extract::rejection::JsonRejection>,
-) -> Result<(StatusCode, Json<Supernet>), ApiError> {
-    let Json(request) = request.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    request: Result<Json<SupernetAlloc>, JsonRejection>,
+) -> Result<(StatusCode, Json<SupernetNode>), ApiError> {
+    let request = json_body(request)?;
     let supernet = state
         .store
         .alloc_supernet(request.name, request.cidr)
         .await?;
-    Ok((StatusCode::CREATED, Json(supernet)))
+    Ok((
+        StatusCode::CREATED,
+        Json(SupernetNode::of(&supernet, Depth::Supernets)),
+    ))
+}
+
+async fn dealloc_supernet(
+    _: Admin,
+    State(state): State<AppState>,
+    name: Result<axum::extract::Path<Name>, PathRejection>,
+    request: Result<Query<SupernetDealloc>, QueryRejection>,
+) -> Result<Json<SupernetNode>, ApiError> {
+    let (name, request) = (path(name)?, query(request)?);
+    let removed = state
+        .store
+        .dealloc_supernet(&name, request.recursive)
+        .await?;
+    // Everything that went with it.
+    Ok(Json(SupernetNode::of(&removed, Depth::Hosts)))
 }
 
 async fn list_subnets(
     State(state): State<AppState>,
-    query: Result<axum::extract::Query<SubnetQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Vec<SubnetEntry>>, ApiError> {
-    let axum::extract::Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let subnets = state.store.subnets(query.supernet.as_ref()).await?;
-    Ok(Json(
-        subnets
-            .into_iter()
-            .map(|(supernet, subnet)| SubnetEntry { supernet, subnet })
-            .collect(),
-    ))
+    request: Result<Query<SubnetQuery>, QueryRejection>,
+) -> Result<Json<Vec<SupernetNode>>, ApiError> {
+    let request = query(request)?;
+    let tree = state.store.tree(request.supernet.as_ref(), None).await?;
+    Ok(Json(nodes(&tree, Depth::Subnets)))
 }
 
 async fn alloc_subnet(
     _: Admin,
     State(state): State<AppState>,
-    request: Result<Json<SubnetAlloc>, axum::extract::rejection::JsonRejection>,
-) -> Result<(StatusCode, Json<SubnetEntry>), ApiError> {
-    let Json(request) = request.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    request: Result<Json<SubnetAlloc>, JsonRejection>,
+) -> Result<(StatusCode, Json<SupernetNode>), ApiError> {
+    let request = json_body(request)?;
     let subnet = state
         .store
         .alloc_subnet(
@@ -176,139 +250,113 @@ async fn alloc_subnet(
             request.reserve_size,
         )
         .await?;
+    let node = SubnetNode::of(&subnet, Depth::Subnets);
     Ok((
         StatusCode::CREATED,
-        Json(SubnetEntry {
-            supernet: request.supernet,
-            subnet,
-        }),
-    ))
-}
-
-async fn dealloc_supernet(
-    _: Admin,
-    State(state): State<AppState>,
-    path: Result<axum::extract::Path<Name>, axum::extract::rejection::PathRejection>,
-    query: Result<axum::extract::Query<SupernetDealloc>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Supernet>, ApiError> {
-    let axum::extract::Path(name) = path.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let axum::extract::Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    Ok(Json(
-        state.store.dealloc_supernet(&name, query.recursive).await?,
+        Json(subnet_path(&state, &request.supernet, node).await?),
     ))
 }
 
 async fn dealloc_subnet(
     _: Admin,
     State(state): State<AppState>,
-    path: Result<axum::extract::Path<(Name, Name)>, axum::extract::rejection::PathRejection>,
-    query: Result<axum::extract::Query<SubnetDealloc>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<SubnetEntry>, ApiError> {
-    let axum::extract::Path((supernet, name)) =
-        path.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let axum::extract::Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let subnet = state
+    names: Result<axum::extract::Path<(Name, Name)>, PathRejection>,
+    request: Result<Query<SubnetDealloc>, QueryRejection>,
+) -> Result<Json<SupernetNode>, ApiError> {
+    let ((supernet, name), request) = (path(names)?, query(request)?);
+    let removed = state
         .store
-        .dealloc_subnet(&supernet, &name, query.recursive)
+        .dealloc_subnet(&supernet, &name, request.recursive)
         .await?;
-    Ok(Json(SubnetEntry { supernet, subnet }))
-}
-
-impl From<IpIn> for IpEntry {
-    fn from(ip: IpIn) -> Self {
-        IpEntry {
-            supernet: ip.supernet,
-            subnet: ip.subnet,
-            kind: ip.kind,
-            name: ip.ip.name,
-            address: ip.ip.address,
-        }
-    }
+    let node = SubnetNode::of(&removed, Depth::Hosts);
+    Ok(Json(subnet_path(&state, &supernet, node).await?))
 }
 
 async fn list_ips(
     State(state): State<AppState>,
-    query: Result<axum::extract::Query<IpQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Vec<IpEntry>>, ApiError> {
-    let axum::extract::Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let ips = state
+    request: Result<Query<IpQuery>, QueryRejection>,
+) -> Result<Json<Vec<SupernetNode>>, ApiError> {
+    let request = query(request)?;
+    let tree = state
         .store
-        .ips(query.supernet.as_ref(), query.subnet.as_ref())
+        .tree(request.supernet.as_ref(), request.subnet.as_ref())
         .await?;
-    Ok(Json(ips.into_iter().map(IpEntry::from).collect()))
+    Ok(Json(nodes(&tree, Depth::Ips)))
 }
 
 async fn alloc_ip(
     _: Admin,
     State(state): State<AppState>,
-    request: Result<Json<IpAlloc>, axum::extract::rejection::JsonRejection>,
-) -> Result<(StatusCode, Json<IpEntry>), ApiError> {
-    let Json(request) = request.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    request: Result<Json<IpAlloc>, JsonRejection>,
+) -> Result<(StatusCode, Json<SupernetNode>), ApiError> {
+    let request = json_body(request)?;
     let ip = state
         .store
         .alloc_ip(&request.supernet, &request.subnet, request.name)
         .await?;
-    Ok((StatusCode::CREATED, Json(ip.into())))
+    let node = IpNode::of(&ip.ip, Depth::Ips);
+    Ok((
+        StatusCode::CREATED,
+        Json(ip_path(&state, &request.supernet, &request.subnet, node).await?),
+    ))
 }
 
 async fn dealloc_ip(
     _: Admin,
     State(state): State<AppState>,
-    path: Result<axum::extract::Path<(Name, Name, Name)>, axum::extract::rejection::PathRejection>,
-) -> Result<Json<IpEntry>, ApiError> {
-    let axum::extract::Path((supernet, subnet, name)) =
-        path.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let ip = state.store.dealloc_ip(&supernet, &subnet, &name).await?;
-    Ok(Json(ip.into()))
+    names: Result<axum::extract::Path<(Name, Name, Name)>, PathRejection>,
+) -> Result<Json<SupernetNode>, ApiError> {
+    let (supernet, subnet, name) = path(names)?;
+    let removed = state.store.dealloc_ip(&supernet, &subnet, &name).await?;
+    let node = IpNode::of(&removed.ip, Depth::Ips);
+    Ok(Json(ip_path(&state, &supernet, &subnet, node).await?))
 }
 
-impl From<HostIn> for HostEntry {
-    fn from(h: HostIn) -> Self {
-        HostEntry {
-            name: h.host.name,
-            supernet: h.host.supernet,
-            subnet: h.host.subnet,
-            ip: h.host.ip,
-            address: h.address,
-        }
-    }
-}
-
-async fn list_hosts(State(state): State<AppState>) -> Json<Vec<HostEntry>> {
-    Json(
-        state
-            .store
-            .hosts()
-            .await
-            .into_iter()
-            .map(HostEntry::from)
-            .collect(),
-    )
+async fn list_hosts(State(state): State<AppState>) -> Result<Json<Vec<SupernetNode>>, ApiError> {
+    let tree = state.store.tree(None, None).await?;
+    Ok(Json(nodes(&tree, Depth::Hosts)))
 }
 
 async fn alloc_host(
     _: Admin,
     State(state): State<AppState>,
-    request: Result<Json<HostAlloc>, axum::extract::rejection::JsonRejection>,
-) -> Result<(StatusCode, Json<HostEntry>), ApiError> {
-    let Json(request) = request.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    request: Result<Json<HostAlloc>, JsonRejection>,
+) -> Result<(StatusCode, Json<SupernetNode>), ApiError> {
+    let request = json_body(request)?;
     let host = Host {
         name: request.name,
         supernet: request.supernet,
         subnet: request.subnet,
         ip: request.ip,
     };
-    let host = state.store.alloc_host(host).await?;
-    Ok((StatusCode::CREATED, Json(host.into())))
+    let added = state.store.alloc_host(host).await?;
+    let node = host_node(&added);
+    Ok((
+        StatusCode::CREATED,
+        Json(ip_path(&state, &added.host.supernet, &added.host.subnet, node).await?),
+    ))
 }
 
 async fn dealloc_host(
     _: Admin,
     State(state): State<AppState>,
-    path: Result<axum::extract::Path<Hostname>, axum::extract::rejection::PathRejection>,
-) -> Result<Json<HostEntry>, ApiError> {
-    let axum::extract::Path(name) = path.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    Ok(Json(state.store.dealloc_host(&name).await?.into()))
+    name: Result<axum::extract::Path<Hostname>, PathRejection>,
+) -> Result<Json<SupernetNode>, ApiError> {
+    let name = path(name)?;
+    let removed = state.store.dealloc_host(&name).await?;
+    let node = host_node(&removed);
+    Ok(Json(
+        ip_path(&state, &removed.host.supernet, &removed.host.subnet, node).await?,
+    ))
+}
+
+/// The ip a host is on, with just that host under it.
+fn host_node(host: &HostIn) -> IpNode {
+    IpNode {
+        name: host.host.ip.clone(),
+        address: host.address,
+        hosts: Some(vec![host.host.name.clone()]),
+    }
 }
 
 //
@@ -471,10 +519,13 @@ mod tests {
             "reserveSize": 26 });
         let (status, body) = post_json(app(dir.path(), ROOT), "/subnets", request).await;
         assert_eq!(status, StatusCode::CREATED);
+        // A tree from the supernet down: the path to the new subnet.
         let dev = serde_json::json!({
-            "supernet": "obd", "name": "k3d-dev", "kind": "docker",
-            "cidr": "10.57.0.0/24", "dockerRange": "10.57.0.0/26",
-            "dockerGateway": "10.57.0.1",
+            "name": "obd", "cidr": "10.57.0.0/16",
+            "subnets": [{
+                "name": "k3d-dev", "kind": "docker", "cidr": "10.57.0.0/24",
+                "dockerRange": "10.57.0.0/26", "dockerGateway": "10.57.0.1",
+            }],
         });
         assert_eq!(body, dev);
 
@@ -536,8 +587,8 @@ mod tests {
 
         let (status, body) = delete(root(), "/subnets/obd/a").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["supernet"], "obd");
-        assert_eq!(body["name"], "a");
+        assert_eq!(body["name"], "obd");
+        assert_eq!(body["subnets"][0]["name"], "a");
         let (status, _) = delete(root(), "/subnets/obd/a").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
@@ -545,7 +596,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             body,
-            serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16" })
+            serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16", "subnets": [] })
         );
         let (status, _) = delete(root(), "/supernets/Bad_Name").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -587,7 +638,11 @@ mod tests {
         let request = serde_json::json!({ "supernet": "obd", "subnet": "host", "name": "db" });
         let (status, body) = post_json(root(), "/ips", request.clone()).await;
         assert_eq!(status, StatusCode::CREATED);
-        let db = serde_json::json!({ "supernet": "obd", "subnet": "host", "kind": "host", "name": "db", "address": "10.57.0.1" });
+        let db = serde_json::json!({
+            "name": "obd", "cidr": "10.57.0.0/16",
+            "subnets": [{ "name": "host", "kind": "host", "cidr": "10.57.0.0/24",
+                "ips": [{ "name": "db", "address": "10.57.0.1" }] }],
+        });
         assert_eq!(body, db);
 
         let stranger = Peer {
@@ -637,7 +692,11 @@ mod tests {
         let request = serde_json::json!({ "name": "app.obd.internal", "supernet": "obd", "subnet": "host", "ip": "web" });
         let (status, body) = post_json(root(), "/hosts", request.clone()).await;
         assert_eq!(status, StatusCode::CREATED);
-        let entry = serde_json::json!({ "name": "app.obd.internal", "supernet": "obd", "subnet": "host", "ip": "web", "address": "10.57.0.1" });
+        let entry = serde_json::json!({
+            "name": "obd", "cidr": "10.57.0.0/16",
+            "subnets": [{ "name": "host", "kind": "host", "cidr": "10.57.0.0/24",
+                "ips": [{ "name": "web", "address": "10.57.0.1", "hosts": ["app.obd.internal"] }] }],
+        });
         assert_eq!(body, entry);
 
         let stranger = Peer {

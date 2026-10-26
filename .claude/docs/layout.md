@@ -117,6 +117,17 @@ To add an endpoint, add its types to `api.rs`, a handler and route in `server.rs
 
 Every CLI command that talks to the daemon takes `--format pretty|json` (default `pretty`). JSON is
 the API type as-is, and pretty-printing lives in `obeliskd-cli/src/pretty.rs`.
+**Responses are trees.** Every list and every change returns supernets with their `subnets[]`,
+`ips[]` and `hosts[]` nested (`SupernetNode` → `SubnetNode` → `IpNode`, in `api.rs`):
+
+- a list goes down to its own level (`supernet list` stops at supernets, `ip list` reaches ips);
+- a level that was asked for is always present, as `[]` when empty, so childless parents show up;
+- filters (`--supernet`, `--subnet`) prune the tree;
+- a change returns the path to what changed: `{ ex1, subnets: [ { 1, ips: [ { db-5 } ] } ] }`.
+
+`--format json` prints that as-is. Pretty lists are tables with one column per level, and a
+parent's columns appear once, on its first row, blank under it. A parent without children gets a
+row of `-`, and an empty list is an empty table (`obeliskd-cli/src/pretty.rs`).
 
 `--help` groups options under three headings: **Core Options** (what the command is about),
 **Extra Options** (presentation shared by many commands, e.g. `--format`) and **Special Options**

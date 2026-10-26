@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::Peer;
 use std::net::Ipv4Addr;
 
-use crate::model::{Hostname, Name, Subnet, SubnetKind};
+use crate::model::{Hostname, Ip, Name, Subnet, SubnetKind, Supernet};
 
 /// `GET /health`
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,14 +48,6 @@ pub struct SubnetAlloc {
     pub reserve_size: Option<u8>,
 }
 
-/// A subnet, with the supernet it's in (`GET /subnets`, `POST /subnets`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubnetEntry {
-    pub supernet: Name,
-    #[serde(flatten)]
-    pub subnet: Subnet,
-}
-
 /// `GET /subnets?supernet=…`
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubnetQuery {
@@ -87,16 +79,6 @@ pub struct IpAlloc {
     pub name: Name,
 }
 
-/// An ip, with where it lives (`GET /ips`, `POST /ips`, `DELETE /ips/…`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IpEntry {
-    pub supernet: Name,
-    pub subnet: Name,
-    pub kind: SubnetKind,
-    pub name: Name,
-    pub address: Ipv4Addr,
-}
-
 /// `GET /ips?supernet=…&subnet=…` (`subnet` needs `supernet`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IpQuery {
@@ -115,14 +97,107 @@ pub struct HostAlloc {
     pub ip: Name,
 }
 
-/// A host, with the ip it points at and that ip's address (`GET /hosts`, `POST`, `DELETE`).
+/// Every response that lists or changes allocations is a tree from the supernets down: a list goes
+/// down to its own level (`supernet list` stops at supernets, `ip list` reaches ips), and a change
+/// is the path to what changed. A level that was asked for is always present (`[]` when empty).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Depth {
+    Supernets,
+    Subnets,
+    Ips,
+    Hosts,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostEntry {
-    pub name: Hostname,
-    pub supernet: Name,
-    pub subnet: Name,
-    pub ip: Name,
+pub struct SupernetNode {
+    pub name: Name,
+    pub cidr: Ipv4Net,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnets: Option<Vec<SubnetNode>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubnetNode {
+    pub name: Name,
+    pub kind: SubnetKind,
+    pub cidr: Ipv4Net,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_range: Option<Ipv4Net>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_gateway: Option<Ipv4Addr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ips: Option<Vec<IpNode>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpNode {
+    pub name: Name,
     pub address: Ipv4Addr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<Hostname>>,
+}
+
+impl SupernetNode {
+    /// `supernet` and everything under it, down to `depth`.
+    #[must_use]
+    pub fn of(supernet: &Supernet, depth: Depth) -> Self {
+        SupernetNode {
+            name: supernet.name.clone(),
+            cidr: supernet.cidr,
+            subnets: (depth >= Depth::Subnets).then(|| {
+                supernet
+                    .subnets
+                    .iter()
+                    .map(|s| SubnetNode::of(s, depth))
+                    .collect()
+            }),
+        }
+    }
+
+    /// Just `supernet`, with `subnet` as its only child: the path to something that changed.
+    #[must_use]
+    pub fn path(supernet: &Supernet, subnet: SubnetNode) -> Self {
+        SupernetNode {
+            subnets: Some(vec![subnet]),
+            ..SupernetNode::of(supernet, Depth::Supernets)
+        }
+    }
+}
+
+impl SubnetNode {
+    #[must_use]
+    pub fn of(subnet: &Subnet, depth: Depth) -> Self {
+        SubnetNode {
+            name: subnet.name.clone(),
+            kind: subnet.kind,
+            cidr: subnet.cidr,
+            docker_range: subnet.docker_range,
+            docker_gateway: subnet.docker_gateway,
+            ips: (depth >= Depth::Ips)
+                .then(|| subnet.ips.iter().map(|ip| IpNode::of(ip, depth)).collect()),
+        }
+    }
+
+    /// Just `subnet`, with `ip` as its only child.
+    #[must_use]
+    pub fn path(subnet: &Subnet, ip: IpNode) -> Self {
+        SubnetNode {
+            ips: Some(vec![ip]),
+            ..SubnetNode::of(subnet, Depth::Subnets)
+        }
+    }
+}
+
+impl IpNode {
+    #[must_use]
+    pub fn of(ip: &Ip, depth: Depth) -> Self {
+        IpNode {
+            name: ip.name.clone(),
+            address: ip.address,
+            hosts: (depth >= Depth::Hosts).then(|| ip.hosts.clone()),
+        }
+    }
 }
 
 /// The body of every non-2xx response.

@@ -6,10 +6,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::api::{
-    ErrorBody, Health, HostAlloc, HostEntry, IpAlloc, IpEntry, IpQuery, SubnetAlloc, SubnetDealloc,
-    SubnetEntry, SubnetQuery, SupernetAlloc, SupernetDealloc,
+    ErrorBody, Health, HostAlloc, IpAlloc, IpQuery, SubnetAlloc, SubnetDealloc, SubnetQuery,
+    SupernetAlloc, SupernetDealloc, SupernetNode,
 };
-use crate::model::{Hostname, Name, Supernet};
+use crate::model::{Hostname, Name};
 use crate::{ObeliskdError, Platform, PlatformImpl};
 
 /// Talks to the daemon over its control socket.
@@ -43,7 +43,7 @@ impl ControlClient {
     /// # Errors
     ///
     /// If the daemon can't be reached, or answers with an error.
-    pub async fn supernets(&self) -> Result<Vec<Supernet>, ObeliskdError> {
+    pub async fn supernets(&self) -> Result<Vec<SupernetNode>, ObeliskdError> {
         self.get("/supernets").await
     }
 
@@ -52,7 +52,10 @@ impl ControlClient {
     /// # Errors
     ///
     /// If the daemon can't be reached, or refuses (e.g. a name taken or an overlap).
-    pub async fn alloc_supernet(&self, request: &SupernetAlloc) -> Result<Supernet, ObeliskdError> {
+    pub async fn alloc_supernet(
+        &self,
+        request: &SupernetAlloc,
+    ) -> Result<SupernetNode, ObeliskdError> {
         self.post("/supernets", request).await
     }
 
@@ -61,7 +64,7 @@ impl ControlClient {
     /// # Errors
     ///
     /// If the daemon can't be reached, or answers with an error (e.g. an unknown supernet).
-    pub async fn subnets(&self, query: &SubnetQuery) -> Result<Vec<SubnetEntry>, ObeliskdError> {
+    pub async fn subnets(&self, query: &SubnetQuery) -> Result<Vec<SupernetNode>, ObeliskdError> {
         self.send(self.http.get(url("/subnets")).query(query)).await
     }
 
@@ -70,7 +73,7 @@ impl ControlClient {
     /// # Errors
     ///
     /// If the daemon can't be reached, or refuses (e.g. an overlap, or no free range).
-    pub async fn alloc_subnet(&self, request: &SubnetAlloc) -> Result<SubnetEntry, ObeliskdError> {
+    pub async fn alloc_subnet(&self, request: &SubnetAlloc) -> Result<SupernetNode, ObeliskdError> {
         self.post("/subnets", request).await
     }
 
@@ -84,7 +87,7 @@ impl ControlClient {
         &self,
         supernet: &Name,
         request: &SupernetDealloc,
-    ) -> Result<Supernet, ObeliskdError> {
+    ) -> Result<SupernetNode, ObeliskdError> {
         let path = format!("/supernets/{supernet}");
         self.send(self.http.delete(url(&path)).query(request)).await
     }
@@ -99,7 +102,7 @@ impl ControlClient {
         supernet: &Name,
         subnet: &Name,
         request: &SubnetDealloc,
-    ) -> Result<SubnetEntry, ObeliskdError> {
+    ) -> Result<SupernetNode, ObeliskdError> {
         let path = format!("/subnets/{supernet}/{subnet}");
         self.send(self.http.delete(url(&path)).query(request)).await
     }
@@ -109,7 +112,7 @@ impl ControlClient {
     /// # Errors
     ///
     /// If the daemon can't be reached, or answers with an error (e.g. an unknown subnet).
-    pub async fn ips(&self, query: &IpQuery) -> Result<Vec<IpEntry>, ObeliskdError> {
+    pub async fn ips(&self, query: &IpQuery) -> Result<Vec<SupernetNode>, ObeliskdError> {
         self.send(self.http.get(url("/ips")).query(query)).await
     }
 
@@ -118,7 +121,7 @@ impl ControlClient {
     /// # Errors
     ///
     /// If the daemon can't be reached, or refuses (name taken, subnet full, …).
-    pub async fn alloc_ip(&self, request: &IpAlloc) -> Result<IpEntry, ObeliskdError> {
+    pub async fn alloc_ip(&self, request: &IpAlloc) -> Result<SupernetNode, ObeliskdError> {
         self.post("/ips", request).await
     }
 
@@ -132,7 +135,7 @@ impl ControlClient {
         supernet: &Name,
         subnet: &Name,
         ip: &Name,
-    ) -> Result<IpEntry, ObeliskdError> {
+    ) -> Result<SupernetNode, ObeliskdError> {
         let path = format!("/ips/{supernet}/{subnet}/{ip}");
         self.send(self.http.delete(url(&path))).await
     }
@@ -142,7 +145,7 @@ impl ControlClient {
     /// # Errors
     ///
     /// If the daemon can't be reached, or answers with an error.
-    pub async fn hosts(&self) -> Result<Vec<HostEntry>, ObeliskdError> {
+    pub async fn hosts(&self) -> Result<Vec<SupernetNode>, ObeliskdError> {
         self.get("/hosts").await
     }
 
@@ -151,7 +154,7 @@ impl ControlClient {
     /// # Errors
     ///
     /// If the daemon can't be reached, or refuses (hostname taken, no such ip, …).
-    pub async fn alloc_host(&self, request: &HostAlloc) -> Result<HostEntry, ObeliskdError> {
+    pub async fn alloc_host(&self, request: &HostAlloc) -> Result<SupernetNode, ObeliskdError> {
         self.post("/hosts", request).await
     }
 
@@ -160,7 +163,7 @@ impl ControlClient {
     /// # Errors
     ///
     /// If the daemon can't be reached, or refuses (unknown host).
-    pub async fn dealloc_host(&self, host: &Hostname) -> Result<HostEntry, ObeliskdError> {
+    pub async fn dealloc_host(&self, host: &Hostname) -> Result<SupernetNode, ObeliskdError> {
         let path = format!("/hosts/{host}");
         self.send(self.http.delete(url(&path))).await
     }

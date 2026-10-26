@@ -160,6 +160,54 @@ impl Store {
         errors
     }
 
+    /// The whole tree, or just one supernet (and within it, one subnet).
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::NotFound`] if a named supernet or subnet doesn't exist;
+    /// [`ObeliskdError::Invalid`] for a subnet without its supernet.
+    pub async fn tree(
+        &self,
+        supernet: Option<&Name>,
+        subnet: Option<&Name>,
+    ) -> Result<Vec<Supernet>, ObeliskdError> {
+        let config = self.config.lock().await;
+        let Some(supernet) = supernet else {
+            if subnet.is_some() {
+                return Err(ObeliskdError::Invalid(
+                    "--subnet needs --supernet (subnet names are per supernet)".to_string(),
+                ));
+            }
+            return Ok(config.supernets.clone());
+        };
+        let mut found = config
+            .supernets
+            .iter()
+            .find(|s| &s.name == supernet)
+            .cloned()
+            .ok_or_else(|| ObeliskdError::NotFound(format!("no supernet {supernet}")))?;
+        if let Some(subnet) = subnet {
+            found.subnets.retain(|s| &s.name == subnet);
+            if found.subnets.is_empty() {
+                return Err(ObeliskdError::NotFound(format!(
+                    "no subnet {supernet}/{subnet}"
+                )));
+            }
+        }
+        Ok(vec![found])
+    }
+
+    /// One supernet, as it is now.
+    pub async fn supernet(&self, name: &Name) -> Option<Supernet> {
+        self.config
+            .lock()
+            .await
+            .supernets
+            .iter()
+            .find(|s| &s.name == name)
+            .cloned()
+    }
+
     pub async fn supernets(&self) -> Vec<Supernet> {
         self.config.lock().await.supernets.clone()
     }

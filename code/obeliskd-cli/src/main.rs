@@ -333,10 +333,10 @@ async fn command_subnet_list(
     supernet: Option<Name>,
     output: &Output,
 ) -> Result<(), ObeliskdError> {
-    let subnets = ControlClient::new(socket)?
+    let tree = ControlClient::new(socket)?
         .subnets(&SubnetQuery { supernet })
         .await?;
-    output.print(&subnets, |s| pretty::subnets(s));
+    output.print(&tree, |t| pretty::subnets(t));
     Ok(())
 }
 
@@ -382,8 +382,8 @@ async fn command_ip_list(
     query: IpQuery,
     output: &Output,
 ) -> Result<(), ObeliskdError> {
-    let ips = ControlClient::new(socket)?.ips(&query).await?;
-    output.print(&ips, |i| pretty::ips(i));
+    let tree = ControlClient::new(socket)?.ips(&query).await?;
+    output.print(&tree, |t| pretty::ips(t));
     Ok(())
 }
 
