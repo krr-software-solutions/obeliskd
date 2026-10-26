@@ -1,6 +1,6 @@
 [package]
 name = "obeliskd"
-description = "A small, hand-written DNS server: the library"
+description = "Local-dev DNS and IP allocation (supernets, subnets, ips, hosts under obd.internal): the library"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
+keywords.workspace = true
+categories = ["network-programming"]
 
 [dependencies]
 axum.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "obeliskd-cli"
-description = "The obeliskd command-line interface and daemon"
+description = "obeliskd: a local-dev DNS server and IP allocator (the daemon and its CLI)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "network-programming"]
 
 [[bin]]
 name = "obeliskd"

@@ -6,16 +6,20 @@ members = [
 ]
 
 [workspace.package]
+# Placeholder: the real version comes from the git tag. CI runs `scripts/set-version.sh`
+# (`v1.2.3` → `1.2.3`) before building or publishing, so local builds report 0.0.0.
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-repository = "https://gitlab.krr-software-solutions.com/oss/obeliskd"
-homepage = "https://gitlab.krr-software-solutions.com/oss/obeliskd"
+repository = "https://github.com/krr-software-solutions/obeliskd"
+homepage = "https://github.com/krr-software-solutions/obeliskd"
 readme = "README.md"
+keywords = ["dns", "local-development", "ip-allocation", "docker", "k3d"]
 
 [workspace.dependencies]
-# workspace crates
+# workspace crates: published together, so each pins the others exactly. The `0.0.0` here is
+# the same placeholder as above and is rewritten along with it.
 obeliskd = { path = "code/obeliskd", version = "=0.0.0" }
 
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }

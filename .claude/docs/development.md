@@ -43,17 +43,37 @@ need root or a grant (see `grant add`).
 
 ## CI (`.gitlab-ci.yml`)
 
-MR pipelines only, for now. Jobs come from the shared templates in `krrss/util/pipeline-utils`
-(`.runner`, `".mr=…,tag=…"`).
+MR pipelines, and release pipelines from a version tag (the same setup as rustable). Jobs come
+from the shared templates in `krrss/util/pipeline-utils` (`.runner`, `".mr=…,tag=…"`).
 
-| Job               | When   | What                                                           |
-|-------------------|--------|----------------------------------------------------------------|
-| `check-pre-merge` | auto   | fails if a `FIX-PRE-MERGE` marker is left anywhere (see below) |
-| `check`           | auto   | fmt, clippy (`-D warnings`), tests                             |
-| `check-target`    | auto   | clippy for macOS (platform code must compile)                  |
-| `build: [target]` | manual | cross-builds the `obeliskd` binary with cargo-zigbuild (Linux musl, macOS) |
+| Job               | MR     | Tag  | What                                                           |
+|-------------------|--------|------|----------------------------------------------------------------|
+| `check-pre-merge` | auto   |      | fails if a `FIX-PRE-MERGE` marker is left anywhere (see below) |
+| `check`           | auto   | auto | fmt, clippy (`-D warnings`), tests                             |
+| `check-target`    | auto   | auto | clippy for macOS (platform code must compile)                  |
+| `shellcheck`      | auto   |      | `install.sh` and `scripts/`                                    |
+| `publish-dry-run` | auto   |      | both crates, packaged and verified as crates.io will see them  |
+| `build: [target]` | manual | auto | cross-builds `obeliskd` with cargo-zigbuild (x86_64/aarch64 Linux musl and macOS), archived with a `.sha256` |
+| `gitlab-release`  |        | auto | archives → the generic package registry, and the GitLab release |
+| `github-release`  |        | auto | pushes the tag to the GitHub mirror and creates its release (archives + `install.sh`) |
+| `install-smoke`   |        | auto | `install.sh` from that release (binary only) installs that exact version |
+| `publish-crates`  |        | auto | `cargo publish --workspace`, last: crates.io can't be undone    |
 
-No release, image, or publish jobs yet.
+## Releasing
+
+The version comes from the tag: Cargo.toml keeps the placeholder `0.0.0` (and the `=0.0.0` pin
+between the crates), and release jobs run `scripts/set-version.sh "$CI_COMMIT_TAG"` first. To
+release, tag the merged `main`:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Needs the CI variables `GITHUB_TOKEN` (writes the GitHub mirror) and `CARGO_REGISTRY_TOKEN`.
+The GitHub mirror (`github.com/krr-software-solutions/obeliskd`) is a GitLab push mirror of
+protected branches; `github-release` pushes the tag itself so it never waits for the mirror.
+`install.sh` downloads and verifies the archive, then runs `sudo obeliskd manage install`
+(`OBELISKD_INSTALL_DIR` puts just the binary somewhere, without a service).
 
 ## The `FIX-PRE-MERGE` marker
 

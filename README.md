@@ -30,6 +30,20 @@ cargo test --workspace
 
 ## Installing
 
+Linux (x86_64, aarch64; the service needs systemd) and macOS:
+
+```sh
+curl -fsSL https://github.com/krr-software-solutions/obeliskd/releases/latest/download/install.sh | sh
+obeliskd manage status   # installed, running, and resolving through the system resolver?
+```
+
+It downloads and verifies the binary, then runs `sudo obeliskd manage install`: the binary goes to
+`/usr/local/bin`, and a systemd/launchd service starts it now and at every boot. Or, with Rust:
+`cargo install obeliskd-cli`, then `sudo "$(command -v obeliskd)" manage install` (sudo's PATH
+usually doesn't include `~/.cargo/bin`).
+
+From a checkout:
+
 ```sh
 cargo build --release
 sudo ./target/release/obeliskd manage install   # /usr/local/bin/obeliskd + a systemd/launchd service, started now and at boot
