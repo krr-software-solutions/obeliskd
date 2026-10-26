@@ -3,7 +3,7 @@
 A small, hand-written DNS server in Rust. It answers for `*.obd.internal`, and the OS routes only
 that suffix to it.
 
-> **Status:** early. It answers `*.obd.internal` A queries with a placeholder address; rules come next.
+> **Status:** early. Allocate supernets, subnets and ips, point hostnames under `obd.internal` at them, and DNS answers.
 
 ## Goals
 

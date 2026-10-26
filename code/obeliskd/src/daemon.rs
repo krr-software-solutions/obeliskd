@@ -49,10 +49,12 @@ pub async fn run(
     eprintln!("obeliskd: control socket at {}", socket.display());
     eprintln!("obeliskd: answering *.{} on {dns_address} (UDP)", dns::ZONE);
 
+    // DNS reads the hosts the store keeps current.
+    let hosts = store.host_table();
     // The control server stops gracefully on the signal; DNS stops when it does.
     let result = tokio::select! {
         result = control::server::serve(listener, AppState { daemon, store }, Platform::shutdown_signal()) => result,
-        () = dns::serve(dns_socket, *dns_address.ip()) => unreachable!("DNS serves until dropped"),
+        () = dns::serve(dns_socket, hosts) => unreachable!("DNS serves until dropped"),
     };
     Platform::unbind_control(socket);
     eprintln!("obeliskd: stopped");

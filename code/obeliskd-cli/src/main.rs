@@ -5,10 +5,11 @@ use std::process::ExitCode;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
 use obeliskd::control::api::{
-    IpAlloc, IpQuery, SubnetAlloc, SubnetDealloc, SubnetQuery, SupernetAlloc, SupernetDealloc,
+    HostAlloc, IpAlloc, IpQuery, SubnetAlloc, SubnetDealloc, SubnetQuery, SupernetAlloc,
+    SupernetDealloc,
 };
 use obeliskd::control::client::ControlClient;
-use obeliskd::model::{Name, SubnetKind};
+use obeliskd::model::{Hostname, Name, SubnetKind};
 use obeliskd::{ObeliskdError, Platform, PlatformImpl};
 use serde::Serialize;
 
@@ -55,6 +56,11 @@ enum Command {
     Ip {
         #[command(subcommand)]
         command: IpCommand,
+    },
+    /// Hosts: hostnames under obd.internal, each resolving to an ip
+    Host {
+        #[command(subcommand)]
+        command: HostCommand,
     },
     /// Print a shell completion script
     Completions { shell: clap_complete::Shell },
@@ -160,6 +166,40 @@ enum SubnetCommand {
         /// Also remove all its ips (otherwise it must have none left)
         #[arg(long)]
         recursive: bool,
+        #[command(flatten)]
+        output: Output,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum HostCommand {
+    /// List every host, with the ip and address it resolves to
+    List {
+        #[command(flatten)]
+        output: Output,
+    },
+    /// Point a hostname at an ip (root only)
+    Alloc {
+        /// The full hostname, e.g. `app.obd.internal`
+        #[arg(long)]
+        host: Hostname,
+        /// The supernet the ip is in
+        #[arg(long)]
+        supernet: Name,
+        /// The subnet the ip is in
+        #[arg(long)]
+        subnet: Name,
+        /// The ip it resolves to
+        #[arg(long)]
+        ip: Name,
+        #[command(flatten)]
+        output: Output,
+    },
+    /// Remove a hostname (root only)
+    Dealloc {
+        /// The full hostname, e.g. `app.obd.internal`
+        #[arg(long)]
+        host: Hostname,
         #[command(flatten)]
         output: Output,
     },
@@ -371,6 +411,32 @@ async fn command_ip_dealloc(
     Ok(())
 }
 
+async fn command_host_list(socket: &Path, output: &Output) -> Result<(), ObeliskdError> {
+    let hosts = ControlClient::new(socket)?.hosts().await?;
+    output.print(&hosts, |h| pretty::hosts(h));
+    Ok(())
+}
+
+async fn command_host_alloc(
+    socket: &Path,
+    request: HostAlloc,
+    output: &Output,
+) -> Result<(), ObeliskdError> {
+    let host = ControlClient::new(socket)?.alloc_host(&request).await?;
+    output.print(&host, pretty::host_allocated);
+    Ok(())
+}
+
+async fn command_host_dealloc(
+    socket: &Path,
+    host: &Hostname,
+    output: &Output,
+) -> Result<(), ObeliskdError> {
+    let removed = ControlClient::new(socket)?.dealloc_host(host).await?;
+    output.print(&removed, pretty::host_deallocated);
+    Ok(())
+}
+
 fn command_completions(shell: clap_complete::Shell) {
     let mut cmd = command();
     let name = cmd.get_name().to_string();
@@ -410,85 +476,124 @@ fn command() -> clap::Command {
     apply(cmd)
 }
 
+async fn run_daemon(socket: &Path, command: DaemonCommand) -> Result<(), ObeliskdError> {
+    match command {
+        DaemonCommand::Run {
+            dns_address,
+            state_dir,
+        } => command_daemon_run(socket, dns_address, &state_dir).await,
+        DaemonCommand::Health { output } => command_daemon_health(socket, &output).await,
+    }
+}
+
+async fn run_supernet(socket: &Path, command: SupernetCommand) -> Result<(), ObeliskdError> {
+    match command {
+        SupernetCommand::List { output } => command_supernet_list(socket, &output).await,
+        SupernetCommand::Alloc {
+            supernet,
+            cidr,
+            output,
+        } => command_supernet_alloc(socket, supernet, cidr, &output).await,
+        SupernetCommand::Dealloc {
+            supernet,
+            recursive,
+            output,
+        } => command_supernet_dealloc(socket, &supernet, recursive, &output).await,
+    }
+}
+
+async fn run_subnet(socket: &Path, command: SubnetCommand) -> Result<(), ObeliskdError> {
+    match command {
+        SubnetCommand::List { supernet, output } => {
+            command_subnet_list(socket, supernet, &output).await
+        }
+        SubnetCommand::Alloc {
+            supernet,
+            subnet,
+            kind,
+            size,
+            reserve_size,
+            output,
+        } => {
+            let request = SubnetAlloc {
+                supernet,
+                name: subnet,
+                kind: kind.into(),
+                size,
+                reserve_size,
+            };
+            command_subnet_alloc(socket, request, &output).await
+        }
+        SubnetCommand::Dealloc {
+            supernet,
+            subnet,
+            recursive,
+            output,
+        } => command_subnet_dealloc(socket, &supernet, &subnet, recursive, &output).await,
+    }
+}
+
+async fn run_ip(socket: &Path, command: IpCommand) -> Result<(), ObeliskdError> {
+    match command {
+        IpCommand::List {
+            supernet,
+            subnet,
+            output,
+        } => command_ip_list(socket, IpQuery { supernet, subnet }, &output).await,
+        IpCommand::Alloc {
+            supernet,
+            subnet,
+            ip,
+            output,
+        } => {
+            let request = IpAlloc {
+                supernet,
+                subnet,
+                name: ip,
+            };
+            command_ip_alloc(socket, request, &output).await
+        }
+        IpCommand::Dealloc {
+            supernet,
+            subnet,
+            ip,
+            output,
+        } => command_ip_dealloc(socket, &supernet, &subnet, &ip, &output).await,
+    }
+}
+
+async fn run_host(socket: &Path, command: HostCommand) -> Result<(), ObeliskdError> {
+    match command {
+        HostCommand::List { output } => command_host_list(socket, &output).await,
+        HostCommand::Alloc {
+            host,
+            supernet,
+            subnet,
+            ip,
+            output,
+        } => {
+            let request = HostAlloc {
+                name: host,
+                supernet,
+                subnet,
+                ip,
+            };
+            command_host_alloc(socket, request, &output).await
+        }
+        HostCommand::Dealloc { host, output } => command_host_dealloc(socket, &host, &output).await,
+    }
+}
+
 async fn main_impl() -> Result<(), ObeliskdError> {
     let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
     let socket: PathBuf = cli.socket;
 
     match cli.command {
-        Command::Daemon { command } => match command {
-            DaemonCommand::Run {
-                dns_address,
-                state_dir,
-            } => command_daemon_run(&socket, dns_address, &state_dir).await,
-            DaemonCommand::Health { output } => command_daemon_health(&socket, &output).await,
-        },
-        Command::Supernet { command } => match command {
-            SupernetCommand::List { output } => command_supernet_list(&socket, &output).await,
-            SupernetCommand::Alloc {
-                supernet,
-                cidr,
-                output,
-            } => command_supernet_alloc(&socket, supernet, cidr, &output).await,
-            SupernetCommand::Dealloc {
-                supernet,
-                recursive,
-                output,
-            } => command_supernet_dealloc(&socket, &supernet, recursive, &output).await,
-        },
-        Command::Subnet { command } => match command {
-            SubnetCommand::List { supernet, output } => {
-                command_subnet_list(&socket, supernet, &output).await
-            }
-            SubnetCommand::Alloc {
-                supernet,
-                subnet,
-                kind,
-                size,
-                reserve_size,
-                output,
-            } => {
-                let request = SubnetAlloc {
-                    supernet,
-                    name: subnet,
-                    kind: kind.into(),
-                    size,
-                    reserve_size,
-                };
-                command_subnet_alloc(&socket, request, &output).await
-            }
-            SubnetCommand::Dealloc {
-                supernet,
-                subnet,
-                recursive,
-                output,
-            } => command_subnet_dealloc(&socket, &supernet, &subnet, recursive, &output).await,
-        },
-        Command::Ip { command } => match command {
-            IpCommand::List {
-                supernet,
-                subnet,
-                output,
-            } => command_ip_list(&socket, IpQuery { supernet, subnet }, &output).await,
-            IpCommand::Alloc {
-                supernet,
-                subnet,
-                ip,
-                output,
-            } => {
-                let request = IpAlloc {
-                    supernet,
-                    subnet,
-                    name: ip,
-                };
-                command_ip_alloc(&socket, request, &output).await
-            }
-            IpCommand::Dealloc {
-                supernet,
-                subnet,
-                ip,
-                output,
-            } => command_ip_dealloc(&socket, &supernet, &subnet, &ip, &output).await,
-        },
+        Command::Daemon { command } => run_daemon(&socket, command).await,
+        Command::Supernet { command } => run_supernet(&socket, command).await,
+        Command::Subnet { command } => run_subnet(&socket, command).await,
+        Command::Ip { command } => run_ip(&socket, command).await,
+        Command::Host { command } => run_host(&socket, command).await,
         Command::Completions { shell } => {
             command_completions(shell);
             Ok(())

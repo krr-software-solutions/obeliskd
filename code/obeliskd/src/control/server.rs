@@ -11,12 +11,13 @@ use std::sync::Arc;
 
 use super::Peer;
 use super::api::{
-    DaemonInfo, ErrorBody, Health, IpAlloc, IpEntry, IpQuery, SubnetAlloc, SubnetDealloc,
-    SubnetEntry, SubnetQuery, SupernetAlloc, SupernetDealloc,
+    DaemonInfo, ErrorBody, Health, HostAlloc, HostEntry, IpAlloc, IpEntry, IpQuery, SubnetAlloc,
+    SubnetDealloc, SubnetEntry, SubnetQuery, SupernetAlloc, SupernetDealloc,
 };
 use super::auth::Admin;
+use crate::model::{Host, Hostname};
 use crate::model::{Name, Supernet};
-use crate::state::{IpIn, Store};
+use crate::state::{HostIn, IpIn, Store};
 use crate::{ObeliskdError, Platform, PlatformImpl};
 
 /// Per-connection info, captured once when the connection is accepted.
@@ -109,6 +110,8 @@ pub fn router(state: AppState) -> Router {
         .route("/subnets/{supernet}/{subnet}", delete(dealloc_subnet))
         .route("/ips", get(list_ips).post(alloc_ip))
         .route("/ips/{supernet}/{subnet}/{ip}", delete(dealloc_ip))
+        .route("/hosts", get(list_hosts).post(alloc_host))
+        .route("/hosts/{host}", delete(dealloc_host))
         .with_state(state)
 }
 
@@ -257,6 +260,55 @@ async fn dealloc_ip(
         path.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let ip = state.store.dealloc_ip(&supernet, &subnet, &name).await?;
     Ok(Json(ip.into()))
+}
+
+impl From<HostIn> for HostEntry {
+    fn from(h: HostIn) -> Self {
+        HostEntry {
+            name: h.host.name,
+            supernet: h.host.supernet,
+            subnet: h.host.subnet,
+            ip: h.host.ip,
+            address: h.address,
+        }
+    }
+}
+
+async fn list_hosts(State(state): State<AppState>) -> Json<Vec<HostEntry>> {
+    Json(
+        state
+            .store
+            .hosts()
+            .await
+            .into_iter()
+            .map(HostEntry::from)
+            .collect(),
+    )
+}
+
+async fn alloc_host(
+    _: Admin,
+    State(state): State<AppState>,
+    request: Result<Json<HostAlloc>, axum::extract::rejection::JsonRejection>,
+) -> Result<(StatusCode, Json<HostEntry>), ApiError> {
+    let Json(request) = request.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    let host = Host {
+        name: request.name,
+        supernet: request.supernet,
+        subnet: request.subnet,
+        ip: request.ip,
+    };
+    let host = state.store.alloc_host(host).await?;
+    Ok((StatusCode::CREATED, Json(host.into())))
+}
+
+async fn dealloc_host(
+    _: Admin,
+    State(state): State<AppState>,
+    path: Result<axum::extract::Path<Hostname>, axum::extract::rejection::PathRejection>,
+) -> Result<Json<HostEntry>, ApiError> {
+    let axum::extract::Path(name) = path.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    Ok(Json(state.store.dealloc_host(&name).await?.into()))
 }
 
 //
@@ -556,6 +608,58 @@ mod tests {
         let (status, body) = delete(root(), "/ips/obd/host/db").await;
         assert_eq!((status, body), (StatusCode::OK, db));
         let (status, _) = delete(root(), "/ips/obd/host/db").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn hosts_over_the_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = || app(dir.path(), ROOT);
+        post_json(
+            root(),
+            "/supernets",
+            serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16" }),
+        )
+        .await;
+        post_json(
+            root(),
+            "/subnets",
+            serde_json::json!({ "supernet": "obd", "name": "host", "kind": "host", "size": 24 }),
+        )
+        .await;
+        post_json(
+            root(),
+            "/ips",
+            serde_json::json!({ "supernet": "obd", "subnet": "host", "name": "web" }),
+        )
+        .await;
+
+        let request = serde_json::json!({ "name": "app.obd.internal", "supernet": "obd", "subnet": "host", "ip": "web" });
+        let (status, body) = post_json(root(), "/hosts", request.clone()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let entry = serde_json::json!({ "name": "app.obd.internal", "supernet": "obd", "subnet": "host", "ip": "web", "address": "10.57.0.1" });
+        assert_eq!(body, entry);
+
+        let stranger = Peer {
+            uid: 4242,
+            gid: 4242,
+            pid: None,
+        };
+        let (status, body) = get_json(app(dir.path(), stranger), "/hosts").await;
+        assert_eq!((status, body), (StatusCode::OK, serde_json::json!([entry])));
+        let (status, _) = post_json(app(dir.path(), stranger), "/hosts", request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let relative =
+            serde_json::json!({ "name": "app", "supernet": "obd", "subnet": "host", "ip": "web" });
+        let (status, _) = post_json(root(), "/hosts", relative).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "full names only");
+        let (status, _) = delete(root(), "/ips/obd/host/web").await;
+        assert_eq!(status, StatusCode::CONFLICT, "the ip has a host");
+
+        let (status, body) = delete(root(), "/hosts/app.obd.internal").await;
+        assert_eq!((status, body), (StatusCode::OK, entry));
+        let (status, _) = delete(root(), "/hosts/app.obd.internal").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 

@@ -12,6 +12,8 @@ sudo ./target/debug/obeliskd --socket /tmp/o.sock subnet alloc --supernet obd --
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock subnet list
 sudo ./target/debug/obeliskd --socket /tmp/o.sock ip alloc --supernet obd --subnet k3d-dev --ip ingress
 ./target/debug/obeliskd --socket /tmp/o.sock ip list
+sudo ./target/debug/obeliskd --socket /tmp/o.sock host alloc --host app.obd.internal --supernet obd --subnet k3d-dev --ip ingress
+dig @127.0.0.79 -p 5379 +short app.obd.internal               # → the ingress ip's address
 sudo ./target/debug/obeliskd --socket /tmp/o.sock subnet dealloc --supernet obd --subnet k3d-dev --recursive
 #   port 5379, not 53 (needs root) or 5353 (mDNS, already held by avahi/browsers).
 #   --state-dir and --dns-address are `daemon run` flags; clients only ever need --socket.

@@ -6,14 +6,16 @@
 //! └── alloc/
 //!     ├── <supernet>.toml          a supernet: name, cidr
 //!     └── <supernet>/
-//!         └── <subnet>.toml        a subnet (kind, cidr, docker range/gateway) and its [[ips]]
+//!         └── <subnet>.toml        a subnet (kind, cidr, docker range/gateway) and its [[ips]],
+//!                                  each with the hostnames that resolve to it
 //! ```
 //!
 //! A file's `name` must match its filename, and a `<supernet>/` dir needs its `<supernet>.toml`.
 //! Only what changed is written, each file atomically (a temp file, synced, renamed over) with
-//! mode `0600` in `0700` dirs. Removals go first (subnet files, then the supernet's dir, then its
+//! mode `0600` in `0700` dirs. Removals go first (subnet files, then a supernet's dir, then its
 //! file) and additions after (a supernet's file before its subnets'), so a crash part-way leaves
-//! something smaller but consistent, never subnets without their supernet.
+//! something smaller but consistent, never subnets without their supernet. Hostnames are unique
+//! across all subnet files.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -127,6 +129,16 @@ pub fn load(dir: &Path) -> Result<(Config, bool), ObeliskdError> {
     }
 
     config.supernets.sort_by_key(|s| s.cidr.network());
+    let mut seen = std::collections::HashMap::new();
+    for (host, _) in config.hosts() {
+        let at = format!("{}/{}/{}", host.supernet, host.subnet, host.ip);
+        if let Some(first) = seen.insert(host.name.clone(), at.clone()) {
+            return Err(state_error(
+                &subnet_path(dir, &host.supernet, &host.subnet),
+                format!("host {} is on both {first} and {at}", host.name),
+            ));
+        }
+    }
     for supernet in &mut config.supernets {
         supernet.subnets.sort_by_key(|s| s.cidr.network());
         // Docker subnets saved before the gateway was recorded: it's always derivable.

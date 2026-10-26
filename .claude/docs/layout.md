@@ -34,7 +34,7 @@ socket, and serves both until the shutdown signal.
   saved, then made visible. `state/files.rs` owns the on-disk layout, **one file per allocation,
   found by scanning**:
   - `alloc/<supernet>.toml`;
-  - `alloc/<supernet>/<subnet>.toml`, which holds a subnet and its `[[ips]]`.
+  - `alloc/<supernet>/<subnet>.toml`, which holds a subnet and its `[[ips]]`, each with its `hosts`.
 
   Only files that changed are written. Removals go first (subnet files, then the supernet's dir,
   then its file) and additions after (a supernet's file before its subnets'), so a crash part-way
@@ -52,6 +52,13 @@ The tree is supernet → subnet → ip. `Ip` (nested in its subnet) is a name pl
 - in a docker subnet: never inside `dockerRange` (which also holds the gateway), and never the
   subnet's network or broadcast address;
 - in a host subnet: anything else in the range.
+
+**Hosts** (`model/host.rs`) are full hostnames (`app.obd.internal`, never `obd.internal` itself,
+and no `*` yet). On disk they live **on the ip they resolve to**
+(`[[ips]] … hosts = ["app.obd.internal"]`, in the subnet's file), so a host can't outlive its ip.
+Hostnames are unique across every subnet. An ip with hosts can't be deallocated, and neither can
+anything containing it, even with `--recursive`. DNS reads a host table (`dns::SharedHosts`) that
+the store swaps after every change, so queries never wait on the store's lock.
 
 Ip names are unique within their subnet. A subnet that still has ips needs `--recursive` to be
 deallocated, just like a supernet with subnets.

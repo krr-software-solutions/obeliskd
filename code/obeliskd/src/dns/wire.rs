@@ -25,6 +25,7 @@ pub const CLASS_IN: u16 = 1;
 pub enum Rcode {
     NoError = 0,
     FormErr = 1,
+    NxDomain = 3,
     NotImp = 4,
     Refused = 5,
 }
@@ -77,6 +78,16 @@ pub struct Name {
 }
 
 impl Name {
+    /// The name as text, without a trailing dot, e.g. `app.obd.internal`.
+    #[must_use]
+    pub fn to_dotted(&self) -> String {
+        self.labels
+            .iter()
+            .map(|l| String::from_utf8_lossy(l))
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
     /// Whether this name is `zone` or below it, e.g. `a.obd.internal` and `obd.internal` are both
     /// in `obd.internal`.
     #[must_use]

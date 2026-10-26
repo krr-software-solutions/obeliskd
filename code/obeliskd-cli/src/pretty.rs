@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use obeliskd::control::api::{Health, IpEntry, SubnetEntry};
+use obeliskd::control::api::{Health, HostEntry, IpEntry, SubnetEntry};
 use obeliskd::model::SubnetKind;
 use obeliskd::model::Supernet;
 
@@ -177,6 +177,34 @@ pub fn ip_deallocated(ip: &IpEntry) -> String {
         "deallocated ip {}/{}/{} ({})\n",
         ip.supernet, ip.subnet, ip.name, ip.address
     )
+}
+
+pub fn hosts(hosts: &[HostEntry]) -> String {
+    if hosts.is_empty() {
+        return "no hosts yet (create one with `obeliskd host alloc`)\n".to_string();
+    }
+    let rows: Vec<[String; 3]> = hosts
+        .iter()
+        .map(|h| {
+            [
+                h.name.to_string(),
+                format!("{}/{}/{}", h.supernet, h.subnet, h.ip),
+                h.address.to_string(),
+            ]
+        })
+        .collect();
+    table(&["HOST", "IP", "ADDRESS"], &rows)
+}
+
+pub fn host_allocated(host: &HostEntry) -> String {
+    format!(
+        "allocated host {} → ip {}/{}/{} ({})\n",
+        host.name, host.supernet, host.subnet, host.ip, host.address
+    )
+}
+
+pub fn host_deallocated(host: &HostEntry) -> String {
+    format!("deallocated host {}\n", host.name)
 }
 
 fn kind(kind: SubnetKind) -> &'static str {

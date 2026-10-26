@@ -2,13 +2,17 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Name, Subnet, SubnetKind};
+use super::{Hostname, Name, Subnet, SubnetKind};
 
 /// One named address in a subnet. obeliskd always picks the address.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ip {
     pub name: Name,
     pub address: Ipv4Addr,
+    /// Hostnames that resolve to this address, sorted. Unique across every subnet; the ip can't be
+    /// removed while it has any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<Hostname>,
 }
 
 /// Whether obeliskd may hand `address` out of `subnet`.
@@ -77,6 +81,7 @@ mod tests {
             .map(|i| Ip {
                 name: Name::parse(&format!("i{i}")).unwrap(),
                 address: Ipv4Addr::new(10, 57, 0, i),
+                hosts: Vec::new(),
             })
             .collect();
         assert_eq!(pick(&host), Some(addr("10.57.1.1")));
@@ -113,6 +118,7 @@ mod tests {
             .map(|i| Ip {
                 name: Name::parse(&format!("i{i}")).unwrap(),
                 address: Ipv4Addr::new(10, 57, 3, i),
+                hosts: Vec::new(),
             })
             .collect();
         assert_eq!(pick(&tiny), None);

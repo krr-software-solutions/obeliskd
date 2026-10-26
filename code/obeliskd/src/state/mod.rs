@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::ObeliskdError;
+use crate::dns::{HostTable, SharedHosts};
 use crate::model::subnet::{self, PlaceError};
-use crate::model::{Ip, Name, Subnet, SubnetKind, Supernet, ip, supernet};
+use crate::model::{Host, Hostname, Ip, Name, Subnet, SubnetKind, Supernet, ip, supernet};
 use crate::os::OsEffects;
 
 pub use files::CONFIG_FILE;
@@ -26,6 +27,69 @@ pub struct Config {
     pub supernets: Vec<Supernet>,
 }
 
+impl Config {
+    fn ip_mut(&mut self, supernet: &Name, subnet: &Name, ip: &Name) -> Option<&mut Ip> {
+        self.supernets
+            .iter_mut()
+            .find(|s| &s.name == supernet)?
+            .subnets
+            .iter_mut()
+            .find(|s| &s.name == subnet)?
+            .ips
+            .iter_mut()
+            .find(|i| &i.name == ip)
+    }
+
+    /// Every host (they live on their ips), with the address it resolves to.
+    pub(crate) fn hosts(&self) -> impl Iterator<Item = (Host, std::net::Ipv4Addr)> + '_ {
+        self.supernets.iter().flat_map(|supernet| {
+            supernet.subnets.iter().flat_map(move |subnet| {
+                subnet.ips.iter().flat_map(move |ip| {
+                    ip.hosts.iter().map(move |name| {
+                        let host = Host {
+                            name: name.clone(),
+                            supernet: supernet.name.clone(),
+                            subnet: subnet.name.clone(),
+                            ip: ip.name.clone(),
+                        };
+                        (host, ip.address)
+                    })
+                })
+            })
+        })
+    }
+
+    /// What DNS answers with.
+    fn host_table(&self) -> HostTable {
+        self.hosts()
+            .map(|(host, address)| (host.name.to_string(), address))
+            .collect()
+    }
+
+    /// Refuses removing ips that hosts still point at; `matches` picks the ips being removed.
+    fn refuse_if_hosts(
+        &self,
+        what: &str,
+        matches: impl Fn(&Host) -> bool,
+    ) -> Result<(), ObeliskdError> {
+        let using: Vec<String> = self
+            .hosts()
+            .filter(|(h, _)| matches(h))
+            .map(|(h, _)| h.name.to_string())
+            .collect();
+        if using.is_empty() {
+            Ok(())
+        } else {
+            Err(ObeliskdError::Conflict(format!(
+                "{what} is still used by host{} {}; dealloc {} first",
+                if using.len() == 1 { "" } else { "s" },
+                using.join(", "),
+                if using.len() == 1 { "it" } else { "them" }
+            )))
+        }
+    }
+}
+
 /// The state dir, the config loaded from it, and the OS it's realized on.
 ///
 /// Every change is applied to the OS first, then saved (undoing the OS change if saving fails),
@@ -34,6 +98,7 @@ pub struct Store {
     dir: PathBuf,
     config: Mutex<Config>,
     os: Arc<dyn OsEffects>,
+    hosts: SharedHosts,
 }
 
 impl Store {
@@ -52,11 +117,29 @@ impl Store {
                 files::ALLOC_DIR
             );
         }
+        let hosts = Arc::new(std::sync::RwLock::new(Arc::new(config.host_table())));
         Ok(Store {
             dir: dir.to_path_buf(),
             config: Mutex::new(config),
             os,
+            hosts,
         })
+    }
+
+    /// The host table DNS reads; the store swaps in a new one after every change.
+    #[must_use]
+    pub fn host_table(&self) -> SharedHosts {
+        Arc::clone(&self.hosts)
+    }
+
+    /// Makes `next` the state (already saved), and refreshes what DNS answers with.
+    fn commit(&self, config: &mut Config, next: Config) {
+        let table = Arc::new(next.host_table());
+        *config = next;
+        *self
+            .hosts
+            .write()
+            .expect("the host table lock is never poisoned") = table;
     }
 
     /// Makes the OS match the config again (routes don't survive a reboot; docker networks are
@@ -119,7 +202,7 @@ impl Store {
             let _ = self.os.remove_supernet(&supernet);
             return Err(error);
         }
-        *config = next;
+        self.commit(&mut config, next);
         Ok(supernet)
     }
 }
@@ -220,7 +303,7 @@ impl Store {
             let _ = self.os.remove_subnet(supernet, &subnet);
             return Err(error);
         }
-        *config = next;
+        self.commit(&mut config, next);
         Ok(subnet)
     }
 }
@@ -245,6 +328,7 @@ impl Store {
             .iter()
             .position(|s| &s.name == name)
             .ok_or_else(|| ObeliskdError::NotFound(format!("no supernet {name}")))?;
+        next.refuse_if_hosts(&format!("supernet {name}"), |h| &h.supernet == name)?;
         let count = next.supernets[index].subnets.len();
         if count > 0 && !recursive {
             return Err(ObeliskdError::Conflict(format!(
@@ -261,7 +345,7 @@ impl Store {
         }
         self.os.remove_supernet(&removed)?;
         files::persist(&self.dir, &config, &next)?;
-        *config = next;
+        self.commit(&mut config, next);
         Ok(removed)
     }
 
@@ -290,6 +374,9 @@ impl Store {
             .position(|s| &s.name == name)
             .ok_or_else(|| ObeliskdError::NotFound(format!("no subnet {supernet}/{name}")))?;
         let count = parent.subnets[index].ips.len();
+        config.refuse_if_hosts(&format!("subnet {supernet}/{name}"), |h| {
+            &h.supernet == supernet && &h.subnet == name
+        })?;
         if count > 0 && !recursive {
             return Err(ObeliskdError::Conflict(format!(
                 "subnet {supernet}/{name} still has {count} ip{}; dealloc them first, or use --recursive",
@@ -302,7 +389,7 @@ impl Store {
         }
         self.os.remove_subnet(supernet, &removed)?;
         files::persist(&self.dir, &config, &next)?;
-        *config = next;
+        self.commit(&mut config, next);
         Ok(removed)
     }
 }
@@ -392,7 +479,11 @@ impl Store {
         let address = ip::pick(parent).ok_or_else(|| {
             ObeliskdError::Conflict(format!("subnet {supernet}/{subnet} is full"))
         })?;
-        let new = Ip { name, address };
+        let new = Ip {
+            name,
+            address,
+            hosts: Vec::new(),
+        };
         parent.ips.push(new.clone());
         let parent = parent.clone();
 
@@ -401,7 +492,7 @@ impl Store {
             let _ = self.os.remove_ip(&parent, &new);
             return Err(error);
         }
-        *config = next;
+        self.commit(&mut config, next);
         Ok(IpIn {
             supernet: supernet.clone(),
             subnet: subnet.clone(),
@@ -424,6 +515,9 @@ impl Store {
     ) -> Result<IpIn, ObeliskdError> {
         let mut config = self.config.lock().await;
         let mut next = config.clone();
+        config.refuse_if_hosts(&format!("ip {supernet}/{subnet}/{name}"), |h| {
+            h.targets(supernet, subnet, name)
+        })?;
         let parent = find_subnet(&mut next, supernet, subnet)?;
         let index = parent
             .ips
@@ -434,13 +528,90 @@ impl Store {
         self.os.remove_ip(parent, &removed)?;
         let kind = parent.kind;
         files::persist(&self.dir, &config, &next)?;
-        *config = next;
+        self.commit(&mut config, next);
         Ok(IpIn {
             supernet: supernet.clone(),
             subnet: subnet.clone(),
             kind,
             ip: removed,
         })
+    }
+}
+
+/// A host, with the address it currently resolves to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostIn {
+    pub host: Host,
+    pub address: std::net::Ipv4Addr,
+}
+
+impl Store {
+    /// Every host, sorted by name.
+    pub async fn hosts(&self) -> Vec<HostIn> {
+        let config = self.config.lock().await;
+        let mut hosts: Vec<HostIn> = config
+            .hosts()
+            .map(|(host, address)| HostIn { host, address })
+            .collect();
+        hosts.sort_by(|a, b| a.host.name.cmp(&b.host.name));
+        hosts
+    }
+
+    /// Points a hostname at an ip (it's saved on the ip, in its subnet's file), and saves. DNS
+    /// answers with it right away.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::Conflict`] if the hostname is taken (by any ip); [`ObeliskdError::NotFound`]
+    /// if the ip doesn't exist; or a failure to save (then nothing changes).
+    pub async fn alloc_host(&self, host: Host) -> Result<HostIn, ObeliskdError> {
+        let mut config = self.config.lock().await;
+        if let Some((taken, _)) = config.hosts().find(|(h, _)| h.name == host.name) {
+            return Err(ObeliskdError::Conflict(format!(
+                "host {} already points at ip {}/{}/{}",
+                host.name, taken.supernet, taken.subnet, taken.ip
+            )));
+        }
+        let mut next = config.clone();
+        let ip = next
+            .ip_mut(&host.supernet, &host.subnet, &host.ip)
+            .ok_or_else(|| {
+                ObeliskdError::NotFound(format!(
+                    "no ip {}/{}/{}",
+                    host.supernet, host.subnet, host.ip
+                ))
+            })?;
+        ip.hosts.push(host.name.clone());
+        ip.hosts.sort();
+        let address = ip.address;
+        files::persist(&self.dir, &config, &next)?;
+        self.commit(&mut config, next);
+        Ok(HostIn { host, address })
+    }
+
+    /// Removes a hostname, and saves. DNS answers NXDOMAIN for it right away.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::NotFound`] if it doesn't exist; or a failure to save.
+    ///
+    /// # Panics
+    ///
+    /// Never: the host was just found on that ip.
+    pub async fn dealloc_host(&self, name: &Hostname) -> Result<HostIn, ObeliskdError> {
+        let mut config = self.config.lock().await;
+        let (host, address) = config
+            .hosts()
+            .find(|(h, _)| &h.name == name)
+            .ok_or_else(|| ObeliskdError::NotFound(format!("no host {name}")))?;
+        let mut next = config.clone();
+        let ip = next
+            .ip_mut(&host.supernet, &host.subnet, &host.ip)
+            .expect("the host was found on this ip");
+        ip.hosts.retain(|h| h != name);
+        files::persist(&self.dir, &config, &next)?;
+        self.commit(&mut config, next);
+        Ok(HostIn { host, address })
     }
 }
 
@@ -1045,6 +1216,163 @@ mod tests {
         ));
         let missing = store.alloc_ip(&name("x"), &name("y"), name("z")).await;
         assert!(matches!(missing, Err(ObeliskdError::NotFound(_))));
+    }
+
+    async fn with_ip(store: &Store) {
+        let obd = name("obd");
+        store
+            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .await
+            .unwrap();
+        store
+            .alloc_subnet(&obd, name("host"), SubnetKind::Host, 24, None)
+            .await
+            .unwrap();
+        store
+            .alloc_ip(&obd, &name("host"), name("web"))
+            .await
+            .unwrap();
+    }
+
+    fn host(hostname: &str) -> Host {
+        Host {
+            name: Hostname::parse(hostname).unwrap(),
+            supernet: name("obd"),
+            subnet: name("host"),
+            ip: name("web"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hosts_resolve_right_away_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = load(dir.path());
+        with_ip(&store).await;
+        let table = store.host_table();
+
+        let app = store.alloc_host(host("app.obd.internal")).await.unwrap();
+        assert_eq!(app.address.to_string(), "10.57.0.1");
+        store.alloc_host(host("admin.obd.internal")).await.unwrap();
+        assert_eq!(
+            table
+                .read()
+                .unwrap()
+                .get("app.obd.internal")
+                .map(ToString::to_string),
+            Some("10.57.0.1".to_string()),
+            "DNS sees it without a restart"
+        );
+
+        let taken = store.alloc_host(host("app.obd.internal")).await;
+        assert!(matches!(taken, Err(ObeliskdError::Conflict(_))));
+        let mut missing = host("x.obd.internal");
+        missing.ip = name("nope");
+        assert!(matches!(
+            store.alloc_host(missing).await,
+            Err(ObeliskdError::NotFound(_))
+        ));
+
+        let reloaded = load(dir.path());
+        let names: Vec<_> = reloaded
+            .hosts()
+            .await
+            .iter()
+            .map(|h| h.host.name.to_string())
+            .collect();
+        assert_eq!(
+            names,
+            ["admin.obd.internal", "app.obd.internal"],
+            "persisted, sorted"
+        );
+        let file = std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap();
+        assert!(
+            file.contains("hosts = [\"admin.obd.internal\", \"app.obd.internal\"]"),
+            "hosts live on their ip, sorted: {file}"
+        );
+
+        store
+            .dealloc_host(&Hostname::parse("app.obd.internal").unwrap())
+            .await
+            .unwrap();
+        assert!(table.read().unwrap().get("app.obd.internal").is_none());
+        let file = std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap();
+        assert!(!file.contains("app.obd.internal"), "{file}");
+        let gone = store
+            .dealloc_host(&Hostname::parse("app.obd.internal").unwrap())
+            .await;
+        assert!(matches!(gone, Err(ObeliskdError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn ips_with_hosts_cant_be_removed_by_any_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = load(dir.path());
+        with_ip(&store).await;
+        store.alloc_host(host("app.obd.internal")).await.unwrap();
+        let (obd, host_subnet) = (name("obd"), name("host"));
+
+        for refused in [
+            store
+                .dealloc_ip(&obd, &host_subnet, &name("web"))
+                .await
+                .map(|_| ()),
+            store
+                .dealloc_subnet(&obd, &host_subnet, true)
+                .await
+                .map(|_| ()),
+            store.dealloc_supernet(&obd, true).await.map(|_| ()),
+        ] {
+            let error = refused.unwrap_err();
+            assert!(matches!(error, ObeliskdError::Conflict(_)), "{error}");
+            assert!(
+                error.to_string().contains("used by host app.obd.internal"),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            store.ips(None, None).await.unwrap().len(),
+            1,
+            "nothing changed"
+        );
+
+        store
+            .dealloc_host(&Hostname::parse("app.obd.internal").unwrap())
+            .await
+            .unwrap();
+        store.dealloc_supernet(&obd, true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn refuses_a_hostname_on_two_ips() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |subnet: &str, cidr: &str, address: &str| {
+            format!(
+                "name = \"{subnet}\"\nkind = \"host\"\ncidr = \"{cidr}\"\n\n[[ips]]\nname = \"web\"\naddress = \"{address}\"\nhosts = [\"app.obd.internal\"]\n"
+            )
+        };
+        std::fs::create_dir_all(dir.path().join("alloc/obd")).unwrap();
+        std::fs::write(
+            dir.path().join("alloc/obd.toml"),
+            "name = \"obd\"\ncidr = \"10.57.0.0/16\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("alloc/obd/a.toml"),
+            file("a", "10.57.0.0/24", "10.57.0.1"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("alloc/obd/b.toml"),
+            file("b", "10.57.1.0/24", "10.57.1.1"),
+        )
+        .unwrap();
+        let error = Store::load(dir.path(), Arc::new(RecordingOs::default()))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("app.obd.internal is on both"),
+            "{error}"
+        );
     }
 
     #[test]

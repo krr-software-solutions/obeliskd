@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::Peer;
 use std::net::Ipv4Addr;
 
-use crate::model::{Name, Subnet, SubnetKind};
+use crate::model::{Hostname, Name, Subnet, SubnetKind};
 
 /// `GET /health`
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +104,25 @@ pub struct IpQuery {
     pub supernet: Option<Name>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subnet: Option<Name>,
+}
+
+/// `POST /hosts`: point a hostname at an ip.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostAlloc {
+    pub name: Hostname,
+    pub supernet: Name,
+    pub subnet: Name,
+    pub ip: Name,
+}
+
+/// A host, with the ip it points at and that ip's address (`GET /hosts`, `POST`, `DELETE`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostEntry {
+    pub name: Hostname,
+    pub supernet: Name,
+    pub subnet: Name,
+    pub ip: Name,
+    pub address: Ipv4Addr,
 }
 
 /// The body of every non-2xx response.

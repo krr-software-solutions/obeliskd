@@ -6,10 +6,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::api::{
-    ErrorBody, Health, IpAlloc, IpEntry, IpQuery, SubnetAlloc, SubnetDealloc, SubnetEntry,
-    SubnetQuery, SupernetAlloc, SupernetDealloc,
+    ErrorBody, Health, HostAlloc, HostEntry, IpAlloc, IpEntry, IpQuery, SubnetAlloc, SubnetDealloc,
+    SubnetEntry, SubnetQuery, SupernetAlloc, SupernetDealloc,
 };
-use crate::model::{Name, Supernet};
+use crate::model::{Hostname, Name, Supernet};
 use crate::{ObeliskdError, Platform, PlatformImpl};
 
 /// Talks to the daemon over its control socket.
@@ -134,6 +134,34 @@ impl ControlClient {
         ip: &Name,
     ) -> Result<IpEntry, ObeliskdError> {
         let path = format!("/ips/{supernet}/{subnet}/{ip}");
+        self.send(self.http.delete(url(&path))).await
+    }
+
+    /// `GET /hosts`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or answers with an error.
+    pub async fn hosts(&self) -> Result<Vec<HostEntry>, ObeliskdError> {
+        self.get("/hosts").await
+    }
+
+    /// `POST /hosts`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or refuses (hostname taken, no such ip, …).
+    pub async fn alloc_host(&self, request: &HostAlloc) -> Result<HostEntry, ObeliskdError> {
+        self.post("/hosts", request).await
+    }
+
+    /// `DELETE /hosts/{host}`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or refuses (unknown host).
+    pub async fn dealloc_host(&self, host: &Hostname) -> Result<HostEntry, ObeliskdError> {
+        let path = format!("/hosts/{host}");
         self.send(self.http.delete(url(&path))).await
     }
 

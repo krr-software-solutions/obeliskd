@@ -2,12 +2,15 @@
 //!
 //! `.internal` is reserved for private use (ICANN, 2024), so no public name can ever collide.
 //! The OS is meant to route only `*.obd.internal` names here (a routing domain), so anything else is
-//! answered `REFUSED`: not our zone, try another server. Never `NXDOMAIN`, which would claim the
-//! name doesn't exist and get cached.
+//! answered `REFUSED`: not our zone, try another server (never `NXDOMAIN`, which would claim a name
+//! we don't own doesn't exist). Inside the zone obeliskd knows every name: a host answers with its
+//! ip's address, and anything else is `NXDOMAIN`.
 
 pub mod wire;
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::sync::{Arc, RwLock};
 
 use tokio::net::UdpSocket;
 
@@ -23,11 +26,16 @@ const ANSWER_TTL: u32 = 60;
 /// Big enough for any query, EDNS options included; longer datagrams are truncated by the OS.
 const MAX_QUERY_LEN: usize = 4096;
 
+/// Every host, by full name: what DNS answers with. Swapped whole whenever hosts change, so a
+/// query never waits on the store.
+pub type HostTable = HashMap<String, Ipv4Addr>;
+
+/// Shared between the store (which replaces the table) and the DNS loop (which reads it).
+pub type SharedHosts = Arc<RwLock<Arc<HostTable>>>;
+
 /// The response to one query packet, or `None` to drop it.
-///
-/// `listening_on` is what every `*.obd.internal` A query is answered with, for now.
 #[must_use]
-pub fn respond(packet: &[u8], listening_on: Ipv4Addr) -> Option<Vec<u8>> {
+pub fn respond(packet: &[u8], hosts: &HostTable) -> Option<Vec<u8>> {
     let header = Header::parse(packet)?;
     if header.is_response() {
         return None;
@@ -52,17 +60,27 @@ pub fn respond(packet: &[u8], listening_on: Ipv4Addr) -> Option<Vec<u8>> {
         ));
     }
 
-    // Ours. Names below the zone have an A record; everything else is NOERROR with no answers
-    // (the name exists, just not with that type), never NXDOMAIN.
-    let answer = (question.qtype == TYPE_A && question.name.is_below(ZONE)).then_some(ARecord {
-        ttl: ANSWER_TTL,
-        // TODO: placeholder. Every name answers with the address the DNS listens on, until rules
-        // decide what each name resolves to.
-        address: listening_on,
-    });
+    // Ours: authoritative from here on.
+    let name = question.name.to_dotted();
+    let (rcode, answer) = match hosts.get(&name) {
+        Some(&address) => {
+            let answer = (question.qtype == TYPE_A).then_some(ARecord {
+                ttl: ANSWER_TTL,
+                address,
+            });
+            // Other types: the name exists, just not with that type (NODATA), never NXDOMAIN.
+            (Rcode::NoError, answer)
+        }
+        // The zone itself, and names with hosts below them (RFC 8020's "empty non-terminals"),
+        // exist too: NODATA.
+        None if name == ZONE || hosts.keys().any(|h| h.ends_with(&format!(".{name}"))) => {
+            (Rcode::NoError, None)
+        }
+        None => (Rcode::NxDomain, None),
+    };
     Some(wire::response(
         header,
-        Rcode::NoError,
+        rcode,
         true,
         Some(&question),
         answer.as_ref(),
@@ -81,7 +99,11 @@ pub async fn bind(address: SocketAddrV4) -> Result<UdpSocket, ObeliskdError> {
 }
 
 /// Answers queries on `socket` until the future is dropped.
-pub async fn serve(socket: UdpSocket, listening_on: Ipv4Addr) {
+///
+/// # Panics
+///
+/// If the host table's lock is poisoned, which can't happen: nothing panics while holding it.
+pub async fn serve(socket: UdpSocket, hosts: SharedHosts) {
     let mut buf = vec![0u8; MAX_QUERY_LEN];
     loop {
         let (len, from) = match socket.recv_from(&mut buf).await {
@@ -91,7 +113,9 @@ pub async fn serve(socket: UdpSocket, listening_on: Ipv4Addr) {
                 continue;
             }
         };
-        let Some(response) = respond(&buf[..len], listening_on) else {
+        // Cloning the Arc is all the lock is held for.
+        let table = Arc::clone(&hosts.read().expect("the host table lock is never poisoned"));
+        let Some(response) = respond(&buf[..len], &table) else {
             continue;
         };
         if let Err(e) = socket.send_to(&response, from).await {
@@ -104,7 +128,18 @@ pub async fn serve(socket: UdpSocket, listening_on: Ipv4Addr) {
 mod tests {
     use super::*;
 
-    const LISTENING_ON: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 79);
+    fn hosts() -> HostTable {
+        HostTable::from([
+            (
+                "my.nested.obd.internal".to_string(),
+                Ipv4Addr::new(10, 57, 0, 5),
+            ),
+            (
+                "a.deep.obd.internal".to_string(),
+                Ipv4Addr::new(10, 57, 0, 6),
+            ),
+        ])
+    }
     const TYPE_AAAA: u16 = 28;
 
     /// A query as a stub resolver sends it: id 0xBEEF, RD set, one question.
@@ -145,7 +180,7 @@ mod tests {
     #[test]
     fn answers_a_for_names_below_the_zone() {
         let q = query("My.Nested.OBD.Internal", TYPE_A);
-        let r = parse(&respond(&q, LISTENING_ON).unwrap());
+        let r = parse(&respond(&q, &hosts()).unwrap());
         assert_eq!(r.flags, 0x8500, "QR, AA, RD; NOERROR");
         assert_eq!((r.qdcount, r.ancount), (1, 1));
 
@@ -161,17 +196,33 @@ mod tests {
             0xC0, 0x0C,       // name: pointer to the question's
             0, 1, 0, 1,       // A, IN
             0, 0, 0, 60,      // TTL
-            0, 4, 127, 0, 0, 79,
+            0, 4, 10, 57, 0, 5,
         ]);
+    }
+
+    #[test]
+    fn unknown_names_in_the_zone_are_nxdomain() {
+        for name in [
+            "nope.obd.internal",
+            "nested.my.obd.internal",
+            "x.a.deep.obd.internal",
+        ] {
+            let r = parse(&respond(&query(name, TYPE_A), &hosts()).unwrap());
+            assert_eq!(rcode(r.flags), Rcode::NxDomain as u16, "{name}");
+            assert_eq!(r.flags & 0x0400, 0x0400, "authoritative for {name}");
+            assert_eq!((r.qdcount, r.ancount), (1, 0));
+        }
     }
 
     #[test]
     fn other_types_in_the_zone_are_nodata_not_nxdomain() {
         for q in [
-            query("x.obd.internal", TYPE_AAAA),
-            query("obd.internal", TYPE_A),
+            query("my.nested.obd.internal", TYPE_AAAA), // a host, another type
+            query("obd.internal", TYPE_A),              // the zone itself
+            query("deep.obd.internal", TYPE_A),         // a host below it (empty non-terminal)
+            query("nested.obd.internal", TYPE_A),
         ] {
-            let r = parse(&respond(&q, LISTENING_ON).unwrap());
+            let r = parse(&respond(&q, &hosts()).unwrap());
             assert_eq!(r.flags, 0x8500, "NOERROR, authoritative");
             assert_eq!((r.qdcount, r.ancount), (1, 0));
         }
@@ -189,7 +240,7 @@ mod tests {
             "obd.internal.example",
             ".",
         ] {
-            let r = parse(&respond(&query(name, TYPE_A), LISTENING_ON).unwrap());
+            let r = parse(&respond(&query(name, TYPE_A), &hosts()).unwrap());
             assert_eq!(rcode(r.flags), Rcode::Refused as u16, "{name}");
             assert_eq!(r.flags & 0x0400, 0, "not authoritative for {name}");
             assert_eq!(r.ancount, 0);
@@ -199,15 +250,15 @@ mod tests {
     #[test]
     fn rejects_what_isnt_a_plain_query() {
         // Too short for a header, or a response: dropped.
-        assert_eq!(respond(&[0; 11], LISTENING_ON), None);
+        assert_eq!(respond(&[0; 11], &hosts()), None);
         let mut response = query("x.obd.internal", TYPE_A);
         response[2] |= 0x80;
-        assert_eq!(respond(&response, LISTENING_ON), None);
+        assert_eq!(respond(&response, &hosts()), None);
 
         // Not a standard query (opcode 2, STATUS).
         let mut status = query("x.obd.internal", TYPE_A);
         status[2] |= 2 << 3;
-        let r = parse(&respond(&status, LISTENING_ON).unwrap());
+        let r = parse(&respond(&status, &hosts()).unwrap());
         assert_eq!(rcode(r.flags), Rcode::NotImp as u16);
 
         // Truncated mid-name, a compression pointer, and two questions.
@@ -217,7 +268,7 @@ mod tests {
         let mut two = query("x.obd.internal", TYPE_A);
         two[5] = 2;
         for bad in [truncated, &pointer, &two] {
-            let r = parse(&respond(bad, LISTENING_ON).unwrap());
+            let r = parse(&respond(bad, &hosts()).unwrap());
             assert_eq!(rcode(r.flags), Rcode::FormErr as u16);
             assert_eq!(r.qdcount, 0);
         }
@@ -226,13 +277,7 @@ mod tests {
     #[test]
     fn rejects_oversized_labels() {
         let long = "a".repeat(64);
-        let r = parse(
-            &respond(
-                &query(&format!("{long}.obd.internal"), TYPE_A),
-                LISTENING_ON,
-            )
-            .unwrap(),
-        );
+        let r = parse(&respond(&query(&format!("{long}.obd.internal"), TYPE_A), &hosts()).unwrap());
         assert_eq!(rcode(r.flags), Rcode::FormErr as u16);
     }
 
@@ -240,18 +285,31 @@ mod tests {
     async fn serves_over_udp() {
         let server = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let address = server.local_addr().unwrap();
-        let serving = tokio::spawn(serve(server, LISTENING_ON));
+        let shared: SharedHosts = Arc::new(RwLock::new(Arc::new(hosts())));
+        let serving = tokio::spawn(serve(server, Arc::clone(&shared)));
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         client
-            .send_to(&query("app.obd.internal", TYPE_A), address)
+            .send_to(&query("my.nested.obd.internal", TYPE_A), address)
             .await
             .unwrap();
         let mut buf = [0u8; 512];
         let len = client.recv(&mut buf).await.unwrap();
         let r = parse(&buf[..len]);
         assert_eq!((rcode(r.flags), r.ancount), (0, 1));
-        assert_eq!(&buf[len - 4..len], [127, 0, 0, 79]);
+        assert_eq!(&buf[len - 4..len], [10, 57, 0, 5]);
+
+        // A new table is picked up by the very next query.
+        *shared.write().unwrap() = Arc::new(HostTable::from([(
+            "my.nested.obd.internal".to_string(),
+            Ipv4Addr::new(10, 57, 9, 9),
+        )]));
+        client
+            .send_to(&query("my.nested.obd.internal", TYPE_A), address)
+            .await
+            .unwrap();
+        let len = client.recv(&mut buf).await.unwrap();
+        assert_eq!(&buf[len - 4..len], [10, 57, 9, 9]);
 
         serving.abort();
     }
