@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use tokio::sync::Mutex;
 use crate::ObeliskdError;
 use crate::model::subnet::{self, PlaceError};
 use crate::model::{Name, Subnet, SubnetKind, Supernet, supernet};
+use crate::os::OsEffects;
 
 pub const CONFIG_FILE: &str = "config.toml";
 
@@ -25,10 +27,14 @@ pub struct Config {
     pub supernets: Vec<Supernet>,
 }
 
-/// The state dir, and the config loaded from it. Every change is saved before it's visible.
+/// The state dir, the config loaded from it, and the OS it's realized on.
+///
+/// Every change is applied to the OS first, then saved (undoing the OS change if saving fails),
+/// and only then visible. Removals go the other way: off the OS, then saved.
 pub struct Store {
     dir: PathBuf,
     config: Mutex<Config>,
+    os: Arc<dyn OsEffects>,
 }
 
 impl Store {
@@ -38,7 +44,7 @@ impl Store {
     ///
     /// If the file exists but can't be read or parsed. The daemon refuses to start rather than
     /// risk overwriting state it couldn't understand.
-    pub fn load(dir: &Path) -> Result<Self, ObeliskdError> {
+    pub fn load(dir: &Path, os: Arc<dyn OsEffects>) -> Result<Self, ObeliskdError> {
         let path = dir.join(CONFIG_FILE);
         let mut config: Config = match std::fs::read_to_string(&path) {
             Ok(text) => toml::from_str(&text)
@@ -59,7 +65,23 @@ impl Store {
         Ok(Store {
             dir: dir.to_path_buf(),
             config: Mutex::new(config),
+            os,
         })
+    }
+
+    /// Makes the OS match the config again (routes don't survive a reboot; docker networks are
+    /// checked). Keeps going past failures and returns them, so one broken subnet doesn't take
+    /// the daemon down.
+    pub async fn reconcile(&self) -> Vec<ObeliskdError> {
+        let config = self.config.lock().await;
+        let mut errors = Vec::new();
+        for supernet in &config.supernets {
+            errors.extend(self.os.ensure_supernet(supernet).err());
+            for subnet in &supernet.subnets {
+                errors.extend(self.os.ensure_subnet(&supernet.name, subnet).err());
+            }
+        }
+        errors
     }
 
     pub async fn supernets(&self) -> Vec<Supernet> {
@@ -99,7 +121,11 @@ impl Store {
         };
         let mut next = config.clone();
         next.supernets.push(supernet.clone());
-        save(&self.dir, &next)?;
+        self.os.ensure_supernet(&supernet)?;
+        if let Err(error) = save(&self.dir, &next) {
+            let _ = self.os.remove_supernet(&supernet);
+            return Err(error);
+        }
         *config = next;
         Ok(supernet)
     }
@@ -195,7 +221,11 @@ impl Store {
             docker_gateway: docker_range.map(|_| subnet::docker_gateway(cidr)),
         };
         parent.subnets.push(subnet.clone());
-        save(&self.dir, &next)?;
+        self.os.ensure_subnet(supernet, &subnet)?;
+        if let Err(error) = save(&self.dir, &next) {
+            let _ = self.os.remove_subnet(supernet, &subnet);
+            return Err(error);
+        }
         *config = next;
         Ok(subnet)
     }
@@ -229,6 +259,10 @@ impl Store {
             )));
         }
         let removed = next.supernets.remove(index);
+        for subnet in &removed.subnets {
+            self.os.remove_subnet(&removed.name, subnet)?;
+        }
+        self.os.remove_supernet(&removed)?;
         save(&self.dir, &next)?;
         *config = next;
         Ok(removed)
@@ -258,6 +292,7 @@ impl Store {
             .position(|s| &s.name == name)
             .ok_or_else(|| ObeliskdError::NotFound(format!("no subnet {supernet}/{name}")))?;
         let removed = parent.subnets.remove(index);
+        self.os.remove_subnet(supernet, &removed)?;
         save(&self.dir, &next)?;
         *config = next;
         Ok(removed)
@@ -293,6 +328,16 @@ fn save(dir: &Path, config: &Config) -> Result<(), ObeliskdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::os::fake::RecordingOs;
+
+    fn load(dir: &Path) -> Store {
+        Store::load(dir, Arc::new(RecordingOs::default())).unwrap()
+    }
+
+    fn load_with(dir: &Path) -> (Store, Arc<RecordingOs>) {
+        let os = Arc::new(RecordingOs::default());
+        (Store::load(dir, os.clone()).unwrap(), os)
+    }
 
     fn name(s: &str) -> Name {
         Name::parse(s).unwrap()
@@ -301,14 +346,14 @@ mod tests {
     #[tokio::test]
     async fn supernets_persist_across_loads() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::load(dir.path()).unwrap();
+        let store = load(dir.path());
         assert_eq!(store.supernets().await, Vec::new());
 
         store
             .alloc_supernet(name("obd"), "10.57.0.0/16".parse().unwrap())
             .await
             .unwrap();
-        let reloaded = Store::load(dir.path()).unwrap();
+        let reloaded = load(dir.path());
         assert_eq!(
             reloaded.supernets().await,
             vec![Supernet {
@@ -335,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_duplicates_overlaps_and_unaligned_cidrs() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::load(dir.path()).unwrap();
+        let store = load(dir.path());
         store
             .alloc_supernet(name("obd"), "10.57.0.0/16".parse().unwrap())
             .await
@@ -361,7 +406,7 @@ mod tests {
     #[tokio::test]
     async fn subnets_nest_in_their_supernet_and_persist() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::load(dir.path()).unwrap();
+        let store = load(dir.path());
         let obd = name("obd");
         store
             .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
@@ -388,7 +433,7 @@ mod tests {
         assert_eq!(dev.docker_gateway, Some("10.57.1.1".parse().unwrap()));
         assert_eq!(host.docker_gateway, None);
 
-        let reloaded = Store::load(dir.path()).unwrap();
+        let reloaded = load(dir.path());
         let all = reloaded.subnets(None).await.unwrap();
         assert_eq!(all, vec![(obd.clone(), host), (obd.clone(), dev)]);
         let text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
@@ -398,7 +443,7 @@ mod tests {
     #[tokio::test]
     async fn subnet_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::load(dir.path()).unwrap();
+        let store = load(dir.path());
         let obd = name("obd");
         store
             .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
@@ -445,7 +490,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let older = "[[supernets]]\nname = \"ex1\"\ncidr = \"10.57.0.0/16\"\n\n[[supernets.subnets]]\nname = \"ex1-6\"\nkind = \"docker\"\ncidr = \"10.57.16.0/22\"\ndockerRange = \"10.57.16.0/28\"\n";
         std::fs::write(dir.path().join(CONFIG_FILE), older).unwrap();
-        let store = Store::load(dir.path()).unwrap();
+        let store = load(dir.path());
         let (_, subnet) = &store.subnets(None).await.unwrap()[0];
         assert_eq!(subnet.docker_gateway, Some("10.57.16.1".parse().unwrap()));
     }
@@ -453,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn dealloc_frees_names_and_ranges() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::load(dir.path()).unwrap();
+        let store = load(dir.path());
         let obd = name("obd");
         store
             .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
@@ -481,14 +526,14 @@ mod tests {
         store.dealloc_subnet(&obd, &name("b")).await.unwrap();
 
         store.dealloc_supernet(&obd, false).await.unwrap();
-        let reloaded = Store::load(dir.path()).unwrap();
+        let reloaded = load(dir.path());
         assert_eq!(reloaded.supernets().await, Vec::new(), "persisted");
     }
 
     #[tokio::test]
     async fn recursive_dealloc_takes_the_subnets_along() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::load(dir.path()).unwrap();
+        let store = load(dir.path());
         let obd = name("obd");
         store
             .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
@@ -503,16 +548,13 @@ mod tests {
         let removed = store.dealloc_supernet(&obd, true).await.unwrap();
         assert_eq!(removed.subnets.len(), 2);
         assert_eq!(store.subnets(None).await.unwrap(), Vec::new());
-        assert_eq!(
-            Store::load(dir.path()).unwrap().supernets().await,
-            Vec::new()
-        );
+        assert_eq!(load(dir.path()).supernets().await, Vec::new());
     }
 
     #[tokio::test]
     async fn dealloc_unknown_is_not_found() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::load(dir.path()).unwrap();
+        let store = load(dir.path());
         assert!(matches!(
             store.dealloc_supernet(&name("nope"), false).await,
             Err(ObeliskdError::NotFound(_))
@@ -531,12 +573,85 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn changes_hit_the_os_in_order_and_failures_change_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, os) = load_with(dir.path());
+        let obd = name("obd");
+        store
+            .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .await
+            .unwrap();
+        store
+            .alloc_subnet(&obd, name("a"), SubnetKind::Host, 24, None)
+            .await
+            .unwrap();
+
+        // The OS refuses: nothing is saved.
+        *os.fail_next.lock().unwrap() = Some(ObeliskdError::Os {
+            command: "docker network create".to_string(),
+            message: "boom".to_string(),
+        });
+        let refused = store
+            .alloc_subnet(&obd, name("b"), SubnetKind::Docker, 24, Some(26))
+            .await;
+        assert!(matches!(refused, Err(ObeliskdError::Os { .. })));
+        assert_eq!(load(dir.path()).subnets(None).await.unwrap().len(), 1);
+
+        store.dealloc_supernet(&obd, true).await.unwrap();
+        assert_eq!(
+            os.calls(),
+            [
+                "ensure supernet 10.57.0.0/16",
+                "ensure subnet obd/a 10.57.0.0/24",
+                "remove subnet obd/a 10.57.0.0/24",
+                "remove supernet 10.57.0.0/16",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_reapplies_everything_and_collects_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = load(dir.path());
+            let obd = name("obd");
+            store
+                .alloc_supernet(obd.clone(), "10.57.0.0/16".parse().unwrap())
+                .await
+                .unwrap();
+            store
+                .alloc_subnet(&obd, name("a"), SubnetKind::Host, 24, None)
+                .await
+                .unwrap();
+        }
+        let (store, os) = load_with(dir.path());
+        assert!(store.reconcile().await.is_empty());
+        assert_eq!(
+            os.calls(),
+            [
+                "ensure supernet 10.57.0.0/16",
+                "ensure subnet obd/a 10.57.0.0/24"
+            ]
+        );
+
+        *os.fail_next.lock().unwrap() = Some(ObeliskdError::Os {
+            command: "ip".to_string(),
+            message: "nope".to_string(),
+        });
+        assert_eq!(
+            store.reconcile().await.len(),
+            1,
+            "keeps going past a failure"
+        );
+    }
+
     #[test]
     fn refuses_a_config_it_cant_parse() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(CONFIG_FILE), "supernets = 7").unwrap();
         assert!(matches!(
-            Store::load(dir.path()),
+            Store::load(dir.path(), Arc::new(RecordingOs::default())),
             Err(ObeliskdError::StateParse { .. })
         ));
     }

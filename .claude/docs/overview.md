@@ -8,9 +8,15 @@ understanding the wire format over pulling in a DNS framework.
 
 `obeliskd daemon run` answers DNS for `*.obd.internal` over UDP (every name answers with a
 placeholder address), and serves the control API on its socket: `GET /health`, supernets
-(`obeliskd supernet list`/`alloc`/`dealloc`) and subnets (`obeliskd subnet list`/`alloc`/`dealloc`). Subnets are
-bookkeeping only so far: nothing is created on the OS (no local routes, no docker networks). There
-are no ips or records yet; no TCP, no IPv6, no OS routing setup.
+(`obeliskd supernet list`/`alloc`/`dealloc`) and subnets (`obeliskd subnet list`/`alloc`/`dealloc`).
+Supernets and subnets are **real on the OS**:
+
+- a supernet gets a Linux `unreachable` catch-all route;
+- a host subnet gets a Linux `local` route;
+- a docker subnet becomes a docker network `obd-<supernet>-<subnet>`.
+
+The daemon **requires root**, and re-applies all of this at every start. There are no ips or records
+yet; no TCP, no IPv6, no DNS routing setup (`~obd.internal`).
 
 ## The zone and its answers (`code/obeliskd/src/dns/`)
 

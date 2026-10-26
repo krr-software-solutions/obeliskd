@@ -37,6 +37,12 @@ pub enum ObeliskdError {
     #[error("{0}")]
     NotFound(String),
 
+    #[error("`{command}` failed: {message}")]
+    Os { command: String, message: String },
+
+    #[error("obeliskd daemon run needs root: it changes routes and docker networks (try sudo)")]
+    NeedsRoot,
+
     #[error("state dir {}: {message}", path.display())]
     StateDir { path: PathBuf, message: String },
 

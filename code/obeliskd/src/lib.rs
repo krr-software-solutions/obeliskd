@@ -3,6 +3,7 @@ pub mod daemon;
 pub mod dns;
 pub mod error;
 pub mod model;
+pub mod os;
 pub mod platform;
 pub mod state;
 

@@ -2,11 +2,14 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
+use ipnet::Ipv4Net;
+
 use tokio::net::{UnixListener, UnixStream};
 
 use super::{PlatformImpl, unix};
 use crate::ObeliskdError;
 use crate::control::Peer;
+use crate::os::command;
 
 pub struct Linux;
 
@@ -46,6 +49,22 @@ impl PlatformImpl for Linux {
         unix::current_uid()
     }
 
+    fn ensure_host_subnet(cidr: Ipv4Net) -> Result<(), ObeliskdError> {
+        command::run_ok(IP, &host_subnet_args("replace", cidr), &[])
+    }
+
+    fn remove_host_subnet(cidr: Ipv4Net) -> Result<(), ObeliskdError> {
+        command::run_ok(IP, &host_subnet_args("del", cidr), &[NO_SUCH_ROUTE])
+    }
+
+    fn ensure_supernet_route(cidr: Ipv4Net) -> Result<(), ObeliskdError> {
+        command::run_ok(IP, &supernet_route_args("replace", cidr), &[])
+    }
+
+    fn remove_supernet_route(cidr: Ipv4Net) -> Result<(), ObeliskdError> {
+        command::run_ok(IP, &supernet_route_args("del", cidr), &[NO_SUCH_ROUTE])
+    }
+
     fn control_socket_path() -> PathBuf {
         PathBuf::from("/run/obeliskd/obeliskd.sock")
     }
@@ -71,9 +90,58 @@ impl PlatformImpl for Linux {
     }
 }
 
+const IP: &str = "ip";
+
+/// What `ip route del` says when the route is already gone.
+const NO_SUCH_ROUTE: &str = "No such process";
+
+/// The metric of the supernet catch-all: high, so any more specific route always wins anyway.
+const SUPERNET_ROUTE_METRIC: &str = "9999";
+
+/// `ip route <verb> local <cidr> dev lo table local`: the whole range is this machine's own.
+/// `replace` adds it or leaves it as is, so it's idempotent.
+fn host_subnet_args(verb: &str, cidr: Ipv4Net) -> Vec<String> {
+    command::args(&[
+        "route",
+        verb,
+        "local",
+        &cidr.to_string(),
+        "dev",
+        "lo",
+        "table",
+        "local",
+    ])
+}
+
+/// `ip route <verb> unreachable <cidr> metric 9999`: unallocated addresses fail instantly.
+fn supernet_route_args(verb: &str, cidr: Ipv4Net) -> Vec<String> {
+    command::args(&[
+        "route",
+        verb,
+        "unreachable",
+        &cidr.to_string(),
+        "metric",
+        SUPERNET_ROUTE_METRIC,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_commands() {
+        let cidr: Ipv4Net = "10.57.0.0/24".parse().unwrap();
+        assert_eq!(
+            host_subnet_args("replace", cidr).join(" "),
+            "route replace local 10.57.0.0/24 dev lo table local"
+        );
+        let supernet: Ipv4Net = "10.57.0.0/16".parse().unwrap();
+        assert_eq!(
+            supernet_route_args("del", supernet).join(" "),
+            "route del unreachable 10.57.0.0/16 metric 9999"
+        );
+    }
 
     #[test]
     fn all_of_127_8_is_already_local() {

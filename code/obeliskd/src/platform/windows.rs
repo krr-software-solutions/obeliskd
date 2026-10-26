@@ -6,6 +6,8 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::{Path, PathBuf};
 
+use ipnet::Ipv4Net;
+
 use tokio::net::{TcpListener, TcpStream};
 
 use super::PlatformImpl;
@@ -52,6 +54,22 @@ impl PlatformImpl for Windows {
 
     fn current_uid() -> u32 {
         todo!("Windows has SIDs, not uids")
+    }
+
+    fn ensure_host_subnet(_cidr: Ipv4Net) -> Result<(), ObeliskdError> {
+        todo!("make a range local on Windows")
+    }
+
+    fn remove_host_subnet(_cidr: Ipv4Net) -> Result<(), ObeliskdError> {
+        todo!("make a range local on Windows")
+    }
+
+    fn ensure_supernet_route(_cidr: Ipv4Net) -> Result<(), ObeliskdError> {
+        todo!("a blackhole route on Windows")
+    }
+
+    fn remove_supernet_route(_cidr: Ipv4Net) -> Result<(), ObeliskdError> {
+        todo!("a blackhole route on Windows")
     }
 
     fn control_socket_path() -> PathBuf {

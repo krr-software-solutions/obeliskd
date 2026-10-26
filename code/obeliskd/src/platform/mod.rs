@@ -6,6 +6,8 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
+
+use ipnet::Ipv4Net;
 use std::path::{Path, PathBuf};
 
 use axum::serve::Listener;
@@ -55,6 +57,36 @@ pub trait PlatformImpl {
     /// The daemon's own (effective) user id. Callers with it are trusted like root, so a daemon
     /// run as yourself (in development) can be managed by yourself.
     fn current_uid() -> u32;
+
+    /// Makes every address in a host subnet local (Linux: one `local` route; macOS: nothing, as
+    /// addresses become local one alias at a time). Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::Os`] if the OS refuses.
+    fn ensure_host_subnet(cidr: Ipv4Net) -> Result<(), ObeliskdError>;
+
+    /// Undoes [`ensure_host_subnet`](Self::ensure_host_subnet). Already gone is fine.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::Os`] if the OS refuses.
+    fn remove_host_subnet(cidr: Ipv4Net) -> Result<(), ObeliskdError>;
+
+    /// Claims a supernet's whole range so unallocated addresses fail fast instead of leaking out
+    /// the default route (Linux: an `unreachable` route; macOS: nothing). Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::Os`] if the OS refuses.
+    fn ensure_supernet_route(cidr: Ipv4Net) -> Result<(), ObeliskdError>;
+
+    /// Undoes [`ensure_supernet_route`](Self::ensure_supernet_route). Already gone is fine.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::Os`] if the OS refuses.
+    fn remove_supernet_route(cidr: Ipv4Net) -> Result<(), ObeliskdError>;
 
     /// Where the daemon listens for control connections, unless told otherwise.
     fn control_socket_path() -> PathBuf;

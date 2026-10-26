@@ -2,6 +2,8 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
+use ipnet::Ipv4Net;
+
 use tokio::net::{UnixListener, UnixStream};
 
 use super::{PlatformImpl, unix};
@@ -58,6 +60,23 @@ impl PlatformImpl for MacOs {
 
     fn current_uid() -> u32 {
         unix::current_uid()
+    }
+
+    fn ensure_host_subnet(_cidr: Ipv4Net) -> Result<(), ObeliskdError> {
+        // macOS has no way to make a whole range local: each ip becomes an lo0 alias instead.
+        Ok(())
+    }
+
+    fn remove_host_subnet(_cidr: Ipv4Net) -> Result<(), ObeliskdError> {
+        Ok(())
+    }
+
+    fn ensure_supernet_route(_cidr: Ipv4Net) -> Result<(), ObeliskdError> {
+        Ok(())
+    }
+
+    fn remove_supernet_route(_cidr: Ipv4Net) -> Result<(), ObeliskdError> {
+        Ok(())
     }
 
     fn control_socket_path() -> PathBuf {

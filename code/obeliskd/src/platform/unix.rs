@@ -158,7 +158,13 @@ mod tests {
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let state = AppState {
             daemon,
-            store: std::sync::Arc::new(Store::load(dir.path()).unwrap()),
+            store: std::sync::Arc::new(
+                Store::load(
+                    dir.path(),
+                    std::sync::Arc::new(crate::os::fake::RecordingOs::default()),
+                )
+                .unwrap(),
+            ),
         };
         let server = tokio::spawn(serve(listener, state, async {
             let _ = stopped.await;

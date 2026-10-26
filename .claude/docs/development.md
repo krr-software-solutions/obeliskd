@@ -3,13 +3,14 @@
 ## Commands
 
 ```sh
-cargo run -p obeliskd-cli -- --socket /tmp/o.sock daemon run --state-dir /tmp/obd-state --dns-address 127.0.0.79:5379
-                                                              # run the daemon as yourself (no root)
-cargo run -p obeliskd-cli -- --socket /tmp/o.sock supernet alloc --supernet obd --cidr 10.57.0.0/16
+cargo build && sudo ./target/debug/obeliskd --socket /tmp/o.sock daemon run --state-dir /tmp/obd-state --dns-address 127.0.0.79:5379
+                                                              # the daemon always needs root (routes, docker)
+sudo ./target/debug/obeliskd --socket /tmp/o.sock supernet alloc --supernet obd --cidr 10.57.0.0/16
+                                                              # changes need root too; reads don't
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock supernet list --format json
-cargo run -p obeliskd-cli -- --socket /tmp/o.sock subnet alloc --supernet obd --subnet k3d-dev --kind docker --size 24 --reserve-size 26
+sudo ./target/debug/obeliskd --socket /tmp/o.sock subnet alloc --supernet obd --subnet k3d-dev --kind docker --size 24 --reserve-size 26
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock subnet list
-cargo run -p obeliskd-cli -- --socket /tmp/o.sock subnet dealloc --supernet obd --subnet k3d-dev
+sudo ./target/debug/obeliskd --socket /tmp/o.sock subnet dealloc --supernet obd --subnet k3d-dev
 #   port 5379, not 53 (needs root) or 5353 (mDNS, already held by avahi/browsers).
 #   --state-dir and --dns-address are `daemon run` flags; clients only ever need --socket.
 cargo run -p obeliskd-cli -- --socket /tmp/o.sock daemon health  # call it
@@ -17,6 +18,7 @@ cargo run -p obeliskd-cli -- completions zsh                 # shell completions
 cargo fmt --all                                              # format
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+cargo test --workspace --locked -- --ignored                 # + the real-Docker test (needs docker access)
 ```
 
 `--locked` matches CI: if `Cargo.lock` needs to change, commit the change.

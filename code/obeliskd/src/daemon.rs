@@ -8,6 +8,7 @@ use jiff::Timestamp;
 
 use crate::control::api::DaemonInfo;
 use crate::control::server::AppState;
+use crate::os::SystemOs;
 use crate::state::Store;
 use crate::{ObeliskdError, Platform, PlatformImpl, control, dns};
 
@@ -22,9 +23,18 @@ pub async fn run(
     dns_address: SocketAddrV4,
     state_dir: &Path,
 ) -> Result<(), ObeliskdError> {
-    // State first: nothing should start serving on top of state that can't be trusted or read.
+    // Everything below changes routes and docker networks.
+    if Platform::current_uid() != 0 {
+        return Err(ObeliskdError::NeedsRoot);
+    }
+    // State next: nothing should start serving on top of state that can't be trusted or read.
     Platform::prepare_state_dir(state_dir)?;
-    let store = Arc::new(Store::load(state_dir)?);
+    let store = Arc::new(Store::load(state_dir, Arc::new(SystemOs))?);
+    // Routes don't survive a reboot, and docker networks may have drifted: make the OS match
+    // the config again. Failures are reported, not fatal: DNS and the API still come up.
+    for error in store.reconcile().await {
+        eprintln!("obeliskd: WARNING - couldn't restore {error}");
+    }
 
     // DNS first: it's the one likely to fail (port 53 needs root; on macOS the address may need an
     // lo0 alias), and then there's no control socket to clean up.

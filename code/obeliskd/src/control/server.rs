@@ -283,7 +283,9 @@ mod tests {
     fn app(state_dir: &std::path::Path, peer: Peer) -> Router {
         let state = AppState {
             daemon: started_at(),
-            store: Arc::new(Store::load(state_dir).unwrap()),
+            store: Arc::new(
+                Store::load(state_dir, Arc::new(crate::os::fake::RecordingOs::default())).unwrap(),
+            ),
         };
         router(state).layer(MockConnectInfo(ConnInfo { peer: Some(peer) }))
     }

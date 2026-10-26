@@ -37,9 +37,33 @@ Deallocating a supernet that still has subnets is refused (409) unless `--recurs
 (`?recursive=true`), which removes its subnets with it; the response includes them. Dealloc routes are `DELETE /supernets/{supernet}` and
 `DELETE /subnets/{supernet}/{subnet}` (Admin), and they return what was removed.
 
-The tree is supernet → subnet → ip; supernets and subnets exist so far, as bookkeeping. Making
-them real on the OS (a Linux `local` route for host subnets, `docker network create` for docker
-ones) comes next.
+The tree is supernet → subnet → ip; supernets and subnets exist so far.
+
+## The OS side (`code/obeliskd/src/os/`)
+
+`config.toml` is the desired state; `OsEffects` makes the OS match it. Every operation is
+idempotent (ensure present / ensure absent):
+
+| Object | Linux | macOS |
+|---|---|---|
+| supernet | `ip route replace unreachable <cidr> metric 9999` | nothing |
+| host subnet | `ip route replace local <cidr> dev lo table local` | nothing (each ip will be an lo0 alias) |
+| docker subnet | `docker network create --subnet --gateway --ip-range --label obeliskd.managed=true … obd-<supernet>-<subnet>` | the same |
+
+- **Order:** a change goes to the OS first and is saved second; if saving fails, the OS change is
+  undone. A removal goes off the OS first and is saved second. If the OS step fails, nothing is
+  saved.
+- **At daemon start:** `Store::reconcile` re-applies everything. Routes don't survive a reboot,
+  and docker networks are checked. Failures are logged as warnings and the daemon still comes up.
+- **Docker networks:**
+  - obeliskd only ever touches networks labelled `obeliskd.managed=true`;
+  - an existing one whose subnet, gateway or ip-range differs is a conflict, never silently "fixed";
+  - one that still has containers attached can't be removed (409).
+- **Tools:** routes and Docker are driven through their CLIs (`ip`, `docker`), via
+  `os/command.rs`. Per-OS route behavior lives in `PlatformImpl` (`ensure_host_subnet`,
+  `ensure_supernet_route`, …); Docker is the same on every OS (`os/docker.rs`).
+- **Tests:** they use `os::fake::RecordingOs`, which records calls and can be told to fail. The
+  real Docker path has an opt-in test: `cargo test -- --ignored` (needs Docker access).
 
 ## The control API (`code/obeliskd/src/control/`)
 
@@ -57,8 +81,8 @@ HTTP over the control socket: the daemon serves it with axum, and the CLI calls 
     nothing obeliskd holds is secret, and needing `sudo` just to look would be friction. Every
     change needs `Admin` (or `Caller`, once access grants exist).
 
-  Admin means root **or the daemon's own uid**, so a daemon run as yourself in development is yours
-  to manage. Requests are parsed first and then rejected with 403. That's intended: there's no
+  Admin means root **or the daemon's own uid**. The daemon now always runs as root, so this is
+  just root. Requests are parsed first and then rejected with 403. That's intended: there's no
   check-before-read.
 
 To add an endpoint, add its types to `api.rs`, a handler and route in `server.rs`, and a method in

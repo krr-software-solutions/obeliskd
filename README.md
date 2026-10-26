@@ -23,8 +23,8 @@ that suffix to it.
 
 ```sh
 cargo build
-cargo run -p obeliskd-cli -- --socket /tmp/obeliskd.sock daemon run      # as yourself
-cargo run -p obeliskd-cli -- --socket /tmp/obeliskd.sock daemon health   # in another shell
+sudo ./target/debug/obeliskd daemon run      # needs root: it manages routes and docker networks
+./target/debug/obeliskd daemon health        # in another shell
 cargo test --workspace
 ```
 
