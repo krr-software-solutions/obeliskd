@@ -4,7 +4,9 @@ use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
-use obeliskd::control::api::{SubnetAlloc, SubnetQuery, SupernetAlloc, SupernetDealloc};
+use obeliskd::control::api::{
+    IpAlloc, IpQuery, SubnetAlloc, SubnetDealloc, SubnetQuery, SupernetAlloc, SupernetDealloc,
+};
 use obeliskd::control::client::ControlClient;
 use obeliskd::model::{Name, SubnetKind};
 use obeliskd::{ObeliskdError, Platform, PlatformImpl};
@@ -48,6 +50,11 @@ enum Command {
     Subnet {
         #[command(subcommand)]
         command: SubnetCommand,
+    },
+    /// Ips: named addresses in a subnet, picked by obeliskd
+    Ip {
+        #[command(subcommand)]
+        command: IpCommand,
     },
     /// Print a shell completion script
     Completions { shell: clap_complete::Shell },
@@ -150,6 +157,52 @@ enum SubnetCommand {
         /// The subnet to remove
         #[arg(long)]
         subnet: Name,
+        /// Also remove all its ips (otherwise it must have none left)
+        #[arg(long)]
+        recursive: bool,
+        #[command(flatten)]
+        output: Output,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IpCommand {
+    /// List ips (all, one supernet's, or one subnet's)
+    List {
+        /// Only this supernet's ips
+        #[arg(long)]
+        supernet: Option<Name>,
+        /// Only this subnet's ips (needs --supernet)
+        #[arg(long, requires = "supernet")]
+        subnet: Option<Name>,
+        #[command(flatten)]
+        output: Output,
+    },
+    /// Give a name the lowest free address in a subnet (root only)
+    Alloc {
+        /// The supernet the subnet is in
+        #[arg(long)]
+        supernet: Name,
+        /// The subnet to take the address from
+        #[arg(long)]
+        subnet: Name,
+        /// Its name, unique within the subnet, e.g. `db`
+        #[arg(long)]
+        ip: Name,
+        #[command(flatten)]
+        output: Output,
+    },
+    /// Free an ip; its address can be handed out again (root only)
+    Dealloc {
+        /// The supernet the subnet is in
+        #[arg(long)]
+        supernet: Name,
+        /// The subnet it's in
+        #[arg(long)]
+        subnet: Name,
+        /// The ip to free
+        #[arg(long)]
+        ip: Name,
         #[command(flatten)]
         output: Output,
     },
@@ -274,12 +327,47 @@ async fn command_subnet_dealloc(
     socket: &Path,
     supernet: &Name,
     subnet: &Name,
+    recursive: bool,
     output: &Output,
 ) -> Result<(), ObeliskdError> {
     let removed = ControlClient::new(socket)?
-        .dealloc_subnet(supernet, subnet)
+        .dealloc_subnet(supernet, subnet, &SubnetDealloc { recursive })
         .await?;
     output.print(&removed, pretty::subnet_deallocated);
+    Ok(())
+}
+
+async fn command_ip_list(
+    socket: &Path,
+    query: IpQuery,
+    output: &Output,
+) -> Result<(), ObeliskdError> {
+    let ips = ControlClient::new(socket)?.ips(&query).await?;
+    output.print(&ips, |i| pretty::ips(i));
+    Ok(())
+}
+
+async fn command_ip_alloc(
+    socket: &Path,
+    request: IpAlloc,
+    output: &Output,
+) -> Result<(), ObeliskdError> {
+    let ip = ControlClient::new(socket)?.alloc_ip(&request).await?;
+    output.print(&ip, pretty::ip_allocated);
+    Ok(())
+}
+
+async fn command_ip_dealloc(
+    socket: &Path,
+    supernet: &Name,
+    subnet: &Name,
+    ip: &Name,
+    output: &Output,
+) -> Result<(), ObeliskdError> {
+    let removed = ControlClient::new(socket)?
+        .dealloc_ip(supernet, subnet, ip)
+        .await?;
+    output.print(&removed, pretty::ip_deallocated);
     Ok(())
 }
 
@@ -371,8 +459,35 @@ async fn main_impl() -> Result<(), ObeliskdError> {
             SubnetCommand::Dealloc {
                 supernet,
                 subnet,
+                recursive,
                 output,
-            } => command_subnet_dealloc(&socket, &supernet, &subnet, &output).await,
+            } => command_subnet_dealloc(&socket, &supernet, &subnet, recursive, &output).await,
+        },
+        Command::Ip { command } => match command {
+            IpCommand::List {
+                supernet,
+                subnet,
+                output,
+            } => command_ip_list(&socket, IpQuery { supernet, subnet }, &output).await,
+            IpCommand::Alloc {
+                supernet,
+                subnet,
+                ip,
+                output,
+            } => {
+                let request = IpAlloc {
+                    supernet,
+                    subnet,
+                    name: ip,
+                };
+                command_ip_alloc(&socket, request, &output).await
+            }
+            IpCommand::Dealloc {
+                supernet,
+                subnet,
+                ip,
+                output,
+            } => command_ip_dealloc(&socket, &supernet, &subnet, &ip, &output).await,
         },
         Command::Completions { shell } => {
             command_completions(shell);

@@ -58,6 +58,15 @@ pub trait PlatformImpl {
     /// run as yourself (in development) can be managed by yourself.
     fn current_uid() -> u32;
 
+    /// Undoes [`ensure_local_address`](Self::ensure_local_address) for an address obeliskd made
+    /// local itself (macOS: removes the lo0 alias; Linux: nothing, the subnet's `local` route
+    /// covers it). Not being there is fine.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::Os`] if the OS refuses.
+    fn release_local_address(address: Ipv4Addr) -> Result<(), ObeliskdError>;
+
     /// Makes every address in a host subnet local (Linux: one `local` route; macOS: nothing, as
     /// addresses become local one alias at a time). Idempotent.
     ///

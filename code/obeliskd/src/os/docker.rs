@@ -189,6 +189,7 @@ mod tests {
                 cidr: "10.57.22.0/24".parse().unwrap(),
                 docker_range: Some("10.57.22.0/26".parse().unwrap()),
                 docker_gateway: Some("10.57.22.1".parse().unwrap()),
+                ips: Vec::new(),
             },
         )
     }
@@ -246,6 +247,7 @@ mod tests {
             cidr: "10.255.251.0/24".parse().unwrap(),
             docker_range: Some("10.255.251.0/26".parse().unwrap()),
             docker_gateway: Some("10.255.251.1".parse().unwrap()),
+            ips: Vec::new(),
         };
         let _ = remove_network(&supernet, &subnet); // leftovers from a failed run
 

@@ -29,13 +29,14 @@ impl PlatformImpl for Linux {
     }
 
     fn ensure_local_address(address: Ipv4Addr) -> Result<(), ObeliskdError> {
-        // All of 127.0.0.0/8 is local on Linux; anything else isn't added by obeliskd (yet).
+        // All of 127.0.0.0/8 is local on Linux, and so is every host subnet (its `local` route);
+        // obeliskd doesn't add single addresses.
         if unix::is_local(address) {
             Ok(())
         } else {
             Err(ObeliskdError::LocalAddress {
                 address,
-                message: "adding addresses isn't supported on Linux yet; use one in 127.0.0.0/8"
+                message: "it's not in 127.0.0.0/8 or a host subnet whose `local` route is in place"
                     .to_string(),
             })
         }
@@ -47,6 +48,11 @@ impl PlatformImpl for Linux {
 
     fn current_uid() -> u32 {
         unix::current_uid()
+    }
+
+    fn release_local_address(_address: Ipv4Addr) -> Result<(), ObeliskdError> {
+        // Host-subnet addresses are local through the subnet's `local` route, not per address.
+        Ok(())
     }
 
     fn ensure_host_subnet(cidr: Ipv4Net) -> Result<(), ObeliskdError> {

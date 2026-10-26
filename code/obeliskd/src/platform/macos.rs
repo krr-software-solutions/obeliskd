@@ -35,13 +35,22 @@ impl PlatformImpl for MacOs {
 
         // Adding an address is an ioctl, which would need `unsafe`; ifconfig does it for us.
         let output = std::process::Command::new("/sbin/ifconfig")
-            .args(["lo0", "alias", &address.to_string(), "up"])
+            // A /32: without a netmask, BSD ifconfig assumes the old classful mask (10.x → /8) and
+            // would route the whole range into loopback.
+            .args([
+                "lo0",
+                "alias",
+                &address.to_string(),
+                "netmask",
+                "255.255.255.255",
+                "up",
+            ])
             .output()
             .map_err(|e| error(format!("couldn't run ifconfig: {e}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(error(format!(
-                "`ifconfig lo0 alias {address}` failed (needs root): {}",
+                "`ifconfig lo0 alias {address} netmask 255.255.255.255` failed (needs root): {}",
                 stderr.trim()
             )));
         }
@@ -60,6 +69,15 @@ impl PlatformImpl for MacOs {
 
     fn current_uid() -> u32 {
         unix::current_uid()
+    }
+
+    fn release_local_address(address: Ipv4Addr) -> Result<(), ObeliskdError> {
+        // "Can't assign requested address": the alias is already gone.
+        crate::os::command::run_ok(
+            "/sbin/ifconfig",
+            &crate::os::command::args(&["lo0", "-alias", &address.to_string()]),
+            &["Can't assign requested address"],
+        )
     }
 
     fn ensure_host_subnet(_cidr: Ipv4Net) -> Result<(), ObeliskdError> {

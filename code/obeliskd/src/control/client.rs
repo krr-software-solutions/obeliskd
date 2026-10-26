@@ -6,7 +6,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::api::{
-    ErrorBody, Health, SubnetAlloc, SubnetEntry, SubnetQuery, SupernetAlloc, SupernetDealloc,
+    ErrorBody, Health, IpAlloc, IpEntry, IpQuery, SubnetAlloc, SubnetDealloc, SubnetEntry,
+    SubnetQuery, SupernetAlloc, SupernetDealloc,
 };
 use crate::model::{Name, Supernet};
 use crate::{ObeliskdError, Platform, PlatformImpl};
@@ -97,12 +98,43 @@ impl ControlClient {
         &self,
         supernet: &Name,
         subnet: &Name,
+        request: &SubnetDealloc,
     ) -> Result<SubnetEntry, ObeliskdError> {
-        self.send(
-            self.http
-                .delete(url(&format!("/subnets/{supernet}/{subnet}"))),
-        )
-        .await
+        let path = format!("/subnets/{supernet}/{subnet}");
+        self.send(self.http.delete(url(&path)).query(request)).await
+    }
+
+    /// `GET /ips`, optionally filtered by supernet (and subnet).
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or answers with an error (e.g. an unknown subnet).
+    pub async fn ips(&self, query: &IpQuery) -> Result<Vec<IpEntry>, ObeliskdError> {
+        self.send(self.http.get(url("/ips")).query(query)).await
+    }
+
+    /// `POST /ips`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or refuses (name taken, subnet full, …).
+    pub async fn alloc_ip(&self, request: &IpAlloc) -> Result<IpEntry, ObeliskdError> {
+        self.post("/ips", request).await
+    }
+
+    /// `DELETE /ips/{supernet}/{subnet}/{ip}`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or refuses (unknown ip).
+    pub async fn dealloc_ip(
+        &self,
+        supernet: &Name,
+        subnet: &Name,
+        ip: &Name,
+    ) -> Result<IpEntry, ObeliskdError> {
+        let path = format!("/ips/{supernet}/{subnet}/{ip}");
+        self.send(self.http.delete(url(&path))).await
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ObeliskdError> {

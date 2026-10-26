@@ -7,7 +7,7 @@
 pub mod command;
 pub mod docker;
 
-use crate::model::{Name, Subnet, SubnetKind, Supernet};
+use crate::model::{Ip, Name, Subnet, SubnetKind, Supernet};
 use crate::{ObeliskdError, Platform, PlatformImpl};
 
 /// What the store asks of the OS.
@@ -33,6 +33,21 @@ pub trait OsEffects: Send + Sync {
     /// If the OS refuses, e.g. Docker won't remove a network that still has containers
     /// ([`ObeliskdError::Conflict`]).
     fn remove_subnet(&self, supernet: &Name, subnet: &Subnet) -> Result<(), ObeliskdError>;
+
+    /// Makes an ip usable: in a host subnet its address must be local (macOS: an lo0 alias);
+    /// in a docker subnet nothing happens (a container or `MetalLB` claims it).
+    ///
+    /// # Errors
+    ///
+    /// If the OS refuses (see [`ObeliskdError::Os`] / [`ObeliskdError::LocalAddress`]).
+    fn ensure_ip(&self, subnet: &Subnet, ip: &Ip) -> Result<(), ObeliskdError>;
+
+    /// Undoes [`ensure_ip`](Self::ensure_ip). Already gone is fine.
+    ///
+    /// # Errors
+    ///
+    /// If the OS refuses.
+    fn remove_ip(&self, subnet: &Subnet, ip: &Ip) -> Result<(), ObeliskdError>;
 }
 
 /// The real thing: routes through [`PlatformImpl`], docker networks through the `docker` CLI.
@@ -58,6 +73,20 @@ impl OsEffects for SystemOs {
         match subnet.kind {
             SubnetKind::Host => Platform::remove_host_subnet(subnet.cidr),
             SubnetKind::Docker => docker::remove_network(supernet, subnet),
+        }
+    }
+
+    fn ensure_ip(&self, subnet: &Subnet, ip: &Ip) -> Result<(), ObeliskdError> {
+        match subnet.kind {
+            SubnetKind::Host => Platform::ensure_local_address(ip.address),
+            SubnetKind::Docker => Ok(()),
+        }
+    }
+
+    fn remove_ip(&self, subnet: &Subnet, ip: &Ip) -> Result<(), ObeliskdError> {
+        match subnet.kind {
+            SubnetKind::Host => Platform::release_local_address(ip.address),
+            SubnetKind::Docker => Ok(()),
         }
     }
 }
@@ -110,6 +139,20 @@ pub mod fake {
             self.record(format!(
                 "remove subnet {supernet}/{} {}",
                 subnet.name, subnet.cidr
+            ))
+        }
+
+        fn ensure_ip(&self, subnet: &Subnet, ip: &Ip) -> Result<(), ObeliskdError> {
+            self.record(format!(
+                "ensure ip {}/{} {}",
+                subnet.name, ip.name, ip.address
+            ))
+        }
+
+        fn remove_ip(&self, subnet: &Subnet, ip: &Ip) -> Result<(), ObeliskdError> {
+            self.record(format!(
+                "remove ip {}/{} {}",
+                subnet.name, ip.name, ip.address
             ))
         }
     }

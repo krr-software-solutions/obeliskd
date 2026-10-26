@@ -56,6 +56,10 @@ impl PlatformImpl for Windows {
         todo!("Windows has SIDs, not uids")
     }
 
+    fn release_local_address(_address: Ipv4Addr) -> Result<(), ObeliskdError> {
+        todo!("remove an address on Windows")
+    }
+
     fn ensure_host_subnet(_cidr: Ipv4Net) -> Result<(), ObeliskdError> {
         todo!("make a range local on Windows")
     }

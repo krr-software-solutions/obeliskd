@@ -30,18 +30,35 @@ socket, and serves both until the shutdown signal.
   docker and refused for host), and `dockerGateway`, the host's address on the network (always the
   subnet's first usable address, inside the slice). obeliskd will only hand out addresses outside
   that slice.
-- `state.rs`: `Store`, which holds `config.toml` loaded in memory behind a mutex. Every change is
-  validated, saved atomically, and only then made visible.
+- `state/`: `Store` holds the whole tree in memory behind a mutex, and every change is validated,
+  saved, then made visible. `state/files.rs` owns the on-disk layout, **one file per allocation,
+  found by scanning**:
+  - `alloc/<supernet>.toml`;
+  - `alloc/<supernet>/<subnet>.toml`, which holds a subnet and its `[[ips]]`.
+
+  Only files that changed are written. Removals go first (subnet files, then the supernet's dir,
+  then its file) and additions after (a supernet's file before its subnets'), so a crash part-way
+  leaves something smaller but consistent. `config.toml` is for daemon settings, never
+  allocations.
 
 Deallocating a supernet that still has subnets is refused (409) unless `--recursive`
 (`?recursive=true`), which removes its subnets with it; the response includes them. Dealloc routes are `DELETE /supernets/{supernet}` and
 `DELETE /subnets/{supernet}/{subnet}` (Admin), and they return what was removed.
 
-The tree is supernet → subnet → ip; supernets and subnets exist so far.
+The tree is supernet → subnet → ip. `Ip` (nested in its subnet) is a name plus an address that
+**obeliskd always picks**: the lowest free one (`model/ip.rs`):
+
+- never an address whose last octet is `0` or `255`, in any subnet;
+- in a docker subnet: never inside `dockerRange` (which also holds the gateway), and never the
+  subnet's network or broadcast address;
+- in a host subnet: anything else in the range.
+
+Ip names are unique within their subnet. A subnet that still has ips needs `--recursive` to be
+deallocated, just like a supernet with subnets.
 
 ## The OS side (`code/obeliskd/src/os/`)
 
-`config.toml` is the desired state; `OsEffects` makes the OS match it. Every operation is
+The state files are the desired state; `OsEffects` makes the OS match it. Every operation is
 idempotent (ensure present / ensure absent):
 
 | Object | Linux | macOS |
@@ -49,6 +66,8 @@ idempotent (ensure present / ensure absent):
 | supernet | `ip route replace unreachable <cidr> metric 9999` | nothing |
 | host subnet | `ip route replace local <cidr> dev lo table local` | nothing (each ip will be an lo0 alias) |
 | docker subnet | `docker network create --subnet --gateway --ip-range --label obeliskd.managed=true … obd-<supernet>-<subnet>` | the same |
+| ip in a host subnet | nothing (the subnet's `local` route covers it; checked to be bindable) | `ifconfig lo0 alias <ip> netmask 255.255.255.255` |
+| ip in a docker subnet | nothing (a reservation) | nothing |
 
 - **Order:** a change goes to the OS first and is saved second; if saving fails, the OS change is
   undone. A removal goes off the OS first and is saved second. If the OS step fails, nothing is

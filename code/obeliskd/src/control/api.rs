@@ -7,6 +7,8 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::Peer;
+use std::net::Ipv4Addr;
+
 use crate::model::{Name, Subnet, SubnetKind};
 
 /// `GET /health`
@@ -67,6 +69,41 @@ pub struct SupernetDealloc {
     /// Also remove its subnets (otherwise it must have none).
     #[serde(default)]
     pub recursive: bool,
+}
+
+/// `DELETE /subnets/{supernet}/{subnet}?recursive=…`
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubnetDealloc {
+    /// Also remove its ips (otherwise it must have none).
+    #[serde(default)]
+    pub recursive: bool,
+}
+
+/// `POST /ips`: obeliskd picks the lowest free address.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpAlloc {
+    pub supernet: Name,
+    pub subnet: Name,
+    pub name: Name,
+}
+
+/// An ip, with where it lives (`GET /ips`, `POST /ips`, `DELETE /ips/…`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpEntry {
+    pub supernet: Name,
+    pub subnet: Name,
+    pub kind: SubnetKind,
+    pub name: Name,
+    pub address: Ipv4Addr,
+}
+
+/// `GET /ips?supernet=…&subnet=…` (`subnet` needs `supernet`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supernet: Option<Name>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet: Option<Name>,
 }
 
 /// The body of every non-2xx response.

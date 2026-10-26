@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use obeliskd::control::api::{Health, SubnetEntry};
+use obeliskd::control::api::{Health, IpEntry, SubnetEntry};
 use obeliskd::model::SubnetKind;
 use obeliskd::model::Supernet;
 
@@ -130,12 +130,52 @@ pub fn supernet_deallocated(supernet: &Supernet) -> String {
 }
 
 pub fn subnet_deallocated(entry: &SubnetEntry) -> String {
-    format!(
+    let subnet = &entry.subnet;
+    let mut out = format!(
         "deallocated {} subnet {}/{} ({})\n",
-        kind(entry.subnet.kind),
+        kind(subnet.kind),
         entry.supernet,
-        entry.subnet.name,
-        entry.subnet.cidr
+        subnet.name,
+        subnet.cidr
+    );
+    for ip in &subnet.ips {
+        let _ = writeln!(
+            out,
+            "  and its ip {}/{}/{} ({})",
+            entry.supernet, subnet.name, ip.name, ip.address
+        );
+    }
+    out
+}
+
+pub fn ips(ips: &[IpEntry]) -> String {
+    if ips.is_empty() {
+        return "no ips yet (create one with `obeliskd ip alloc`)\n".to_string();
+    }
+    let rows: Vec<[String; 3]> = ips
+        .iter()
+        .map(|ip| {
+            [
+                format!("{}/{}/{}", ip.supernet, ip.subnet, ip.name),
+                ip.address.to_string(),
+                kind(ip.kind).to_string(),
+            ]
+        })
+        .collect();
+    table(&["IP", "ADDRESS", "KIND"], &rows)
+}
+
+pub fn ip_allocated(ip: &IpEntry) -> String {
+    format!(
+        "allocated ip {}/{}/{} = {}\n",
+        ip.supernet, ip.subnet, ip.name, ip.address
+    )
+}
+
+pub fn ip_deallocated(ip: &IpEntry) -> String {
+    format!(
+        "deallocated ip {}/{}/{} ({})\n",
+        ip.supernet, ip.subnet, ip.name, ip.address
     )
 }
 
