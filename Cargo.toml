@@ -9,6 +9,7 @@ members = [
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.85"
+license = "MIT OR Apache-2.0"
 repository = "https://gitlab.krr-software-solutions.com/oss/obeliskd"
 homepage = "https://gitlab.krr-software-solutions.com/oss/obeliskd"
 readme = "README.md"

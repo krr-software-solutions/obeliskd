@@ -37,3 +37,8 @@ obeliskd manage status                          # installed, running, and resolv
 ```
 
 Requires Rust 1.85+ (edition 2024).
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT),
+at your option.
