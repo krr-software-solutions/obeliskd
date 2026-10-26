@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
 use obeliskd::control::api::{
-    HostAlloc, IpAlloc, IpQuery, SubnetAlloc, SubnetDealloc, SubnetQuery, SupernetAlloc,
+    HostAlloc, IpAlloc, IpDealloc, IpQuery, SubnetAlloc, SubnetDealloc, SubnetQuery, SupernetAlloc,
     SupernetDealloc,
 };
 use obeliskd::control::client::ControlClient;
@@ -119,7 +119,7 @@ enum SupernetCommand {
         /// The supernet to remove
         #[arg(long)]
         supernet: Name,
-        /// Also remove all its subnets (otherwise it must have none left)
+        /// Also remove everything in it: subnets, ips and hosts (otherwise it must have no subnets)
         #[arg(long)]
         recursive: bool,
         #[command(flatten)]
@@ -166,7 +166,7 @@ enum SubnetCommand {
         /// The subnet to remove
         #[arg(long)]
         subnet: Name,
-        /// Also remove all its ips (otherwise it must have none left)
+        /// Also remove its ips and their hosts (otherwise it must have no ips)
         #[arg(long)]
         recursive: bool,
         #[command(flatten)]
@@ -252,6 +252,9 @@ enum IpCommand {
         /// The ip to free
         #[arg(long)]
         ip: Name,
+        /// Also remove the hosts pointing at it (otherwise it must have none)
+        #[arg(long)]
+        recursive: bool,
         #[command(flatten)]
         output: Output,
     },
@@ -411,10 +414,11 @@ async fn command_ip_dealloc(
     supernet: &Name,
     subnet: &Name,
     ip: &Name,
+    recursive: bool,
     output: &Output,
 ) -> Result<(), ObeliskdError> {
     let removed = ControlClient::new(socket)?
-        .dealloc_ip(supernet, subnet, ip)
+        .dealloc_ip(supernet, subnet, ip, &IpDealloc { recursive })
         .await?;
     output.print(&removed, pretty::ip_deallocated);
     Ok(())
@@ -595,8 +599,9 @@ async fn run_ip(socket: &Path, command: IpCommand) -> Result<(), ObeliskdError> 
             supernet,
             subnet,
             ip,
+            recursive,
             output,
-        } => command_ip_dealloc(socket, &supernet, &subnet, &ip, &output).await,
+        } => command_ip_dealloc(socket, &supernet, &subnet, &ip, recursive, &output).await,
     }
 }
 

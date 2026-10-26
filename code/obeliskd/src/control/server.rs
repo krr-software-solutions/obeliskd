@@ -12,8 +12,9 @@ use std::sync::Arc;
 
 use super::Peer;
 use super::api::{
-    DaemonInfo, Depth, ErrorBody, Health, HostAlloc, IpAlloc, IpNode, IpQuery, SubnetAlloc,
-    SubnetDealloc, SubnetNode, SubnetQuery, SupernetAlloc, SupernetDealloc, SupernetNode,
+    DaemonInfo, Depth, ErrorBody, Health, HostAlloc, IpAlloc, IpDealloc, IpNode, IpQuery,
+    SubnetAlloc, SubnetDealloc, SubnetNode, SubnetQuery, SupernetAlloc, SupernetDealloc,
+    SupernetNode,
 };
 use super::auth::Admin;
 use crate::model::{Host, Hostname};
@@ -346,10 +347,15 @@ async fn dealloc_ip(
     _: Admin,
     State(state): State<AppState>,
     names: Result<axum::extract::Path<(Name, Name, Name)>, PathRejection>,
+    request: Result<Query<IpDealloc>, QueryRejection>,
 ) -> Result<Json<SupernetNode>, ApiError> {
-    let (supernet, subnet, name) = path(names)?;
-    let removed = state.store.dealloc_ip(&supernet, &subnet, &name).await?;
-    let node = IpNode::of(&removed.ip, Depth::Ips);
+    let ((supernet, subnet, name), request) = (path(names)?, query(request)?);
+    let removed = state
+        .store
+        .dealloc_ip(&supernet, &subnet, &name, request.recursive)
+        .await?;
+    // With any hosts it took along.
+    let node = IpNode::of(&removed.ip, Depth::Hosts);
     Ok(Json(ip_path(&state, &supernet, &subnet, node).await?))
 }
 
@@ -703,7 +709,13 @@ mod tests {
         let (status, _) = delete(root(), "/subnets/obd/host").await;
         assert_eq!(status, StatusCode::CONFLICT, "still has an ip");
         let (status, body) = delete(root(), "/ips/obd/host/db").await;
-        assert_eq!((status, body), (StatusCode::OK, db));
+        let mut removed = db.clone();
+        removed["subnets"][0]["ips"][0]["hosts"] = serde_json::json!([]);
+        assert_eq!(
+            (status, body),
+            (StatusCode::OK, removed),
+            "with the hosts it took along"
+        );
         let (status, _) = delete(root(), "/ips/obd/host/db").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }

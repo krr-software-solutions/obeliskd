@@ -58,7 +58,7 @@ pub struct SubnetQuery {
 /// `DELETE /supernets/{supernet}?recursive=…`
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupernetDealloc {
-    /// Also remove its subnets (otherwise it must have none).
+    /// Also remove everything in it: subnets, ips and hosts (otherwise it must have no subnets).
     #[serde(default)]
     pub recursive: bool,
 }
@@ -66,7 +66,15 @@ pub struct SupernetDealloc {
 /// `DELETE /subnets/{supernet}/{subnet}?recursive=…`
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubnetDealloc {
-    /// Also remove its ips (otherwise it must have none).
+    /// Also remove its ips, and their hosts (otherwise it must have no ips).
+    #[serde(default)]
+    pub recursive: bool,
+}
+
+/// `DELETE /ips/{supernet}/{subnet}/{ip}?recursive=…`
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpDealloc {
+    /// Also remove the hosts pointing at it (otherwise it must have none).
     #[serde(default)]
     pub recursive: bool,
 }

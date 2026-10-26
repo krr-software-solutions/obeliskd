@@ -41,9 +41,18 @@ socket, and serves both until the shutdown signal.
   leaves something smaller but consistent. `config.toml` is for daemon settings, never
   allocations.
 
-Deallocating a supernet that still has subnets is refused (409) unless `--recursive`
-(`?recursive=true`), which removes its subnets with it; the response includes them. Dealloc routes are `DELETE /supernets/{supernet}` and
-`DELETE /subnets/{supernet}/{subnet}` (Admin), and they return what was removed.
+**Deallocating is refused (409) while something is below, unless `--recursive`** (`?recursive=true`).
+Recursive removes everything below, **hosts included**:
+
+| Command | Without `--recursive` | With it |
+|---|---|---|
+| `supernet dealloc` | refused if it has subnets | removes its subnets, their ips and their hosts |
+| `subnet dealloc` | refused if it has ips | removes its ips and their hosts |
+| `ip dealloc` | refused if it has hosts | removes its hosts |
+| `host dealloc` | removes it | n/a |
+
+The routes are `DELETE /supernets/{supernet}`, `/subnets/{supernet}/{subnet}` and
+`/ips/{supernet}/{subnet}/{ip}` (Admin). Each returns everything it removed.
 
 The tree is supernet → subnet → ip. `Ip` (nested in its subnet) is a name plus an address that
 **obeliskd always picks**: the lowest free one (`model/ip.rs`):
@@ -57,15 +66,14 @@ The tree is supernet → subnet → ip. `Ip` (nested in its subnet) is a name pl
 and a label may be exactly `*`: a wildcard for one label; `dns/hosts.rs` has the matching and
 priority rules). On disk they live **on the ip they resolve to**
 (`[[ips]] … hosts = ["app.obd.internal"]`, in the subnet's file), so a host can't outlive its ip.
-Hostnames are unique across every subnet. An ip with hosts can't be deallocated, and neither can
-anything containing it, even with `--recursive`. DNS reads a host table (`dns::SharedHosts`) that
+Hostnames are unique across every subnet. An ip with hosts can only be deallocated with
+`--recursive` (which removes them too), and the same goes for anything containing it. DNS reads a host table (`dns::SharedHosts`) that
 the store swaps after every change, so queries never wait on the store's lock.
 
 Ip names are unique within their subnet. An ip may carry **one optional `tag`** (`ip alloc --tag
 pr-42`, name rules): a group label, a sort of "sub-sub-net", so a set of ips can be found together
 (`ip list --tag pr-42`), and later removed together. The tag doesn't affect which address is picked.
-The `--tag` filter drops branches with no matching ips, rather than showing them as dash rows. A subnet that still has ips needs `--recursive` to be
-deallocated, just like a supernet with subnets.
+The `--tag` filter drops branches with no matching ips, rather than showing them as dash rows. (See the dealloc table above for `--recursive`.)
 
 ## The OS side (`code/obeliskd/src/os/`)
 

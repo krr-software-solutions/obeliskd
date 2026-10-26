@@ -6,8 +6,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::api::{
-    ErrorBody, Health, HostAlloc, IpAlloc, IpQuery, SubnetAlloc, SubnetDealloc, SubnetQuery,
-    SupernetAlloc, SupernetDealloc, SupernetNode,
+    ErrorBody, Health, HostAlloc, IpAlloc, IpDealloc, IpQuery, SubnetAlloc, SubnetDealloc,
+    SubnetQuery, SupernetAlloc, SupernetDealloc, SupernetNode,
 };
 use crate::model::{Hostname, Name};
 use crate::{ObeliskdError, Platform, PlatformImpl};
@@ -135,9 +135,10 @@ impl ControlClient {
         supernet: &Name,
         subnet: &Name,
         ip: &Name,
+        request: &IpDealloc,
     ) -> Result<SupernetNode, ObeliskdError> {
         let path = format!("/ips/{supernet}/{subnet}/{ip}");
-        self.send(self.http.delete(url(&path))).await
+        self.send(self.http.delete(url(&path)).query(request)).await
     }
 
     /// `GET /hosts`

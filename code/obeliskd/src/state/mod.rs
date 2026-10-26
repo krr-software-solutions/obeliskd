@@ -81,7 +81,7 @@ impl Config {
             Ok(())
         } else {
             Err(ObeliskdError::Conflict(format!(
-                "{what} is still used by host{} {}; dealloc {} first",
+                "{what} is still used by host{} {}; dealloc {} first, or use --recursive",
                 if using.len() == 1 { "" } else { "s" },
                 using.join(", "),
                 if using.len() == 1 { "it" } else { "them" }
@@ -376,8 +376,9 @@ impl Store {
 }
 
 impl Store {
-    /// Removes a supernet, and saves. With `recursive`, its subnets go with it; without, it must
-    /// have none. The removed supernet (with any subnets it took along) is returned.
+    /// Removes a supernet, and saves. With `recursive`, everything in it goes too (subnets, their
+    /// ips and those ips' hosts); without, it must have no subnets. The removed supernet, with
+    /// everything it took along, is returned.
     ///
     /// # Errors
     ///
@@ -395,7 +396,6 @@ impl Store {
             .iter()
             .position(|s| &s.name == name)
             .ok_or_else(|| ObeliskdError::NotFound(format!("no supernet {name}")))?;
-        next.refuse_if_hosts(&format!("supernet {name}"), |h| &h.supernet == name)?;
         let count = next.supernets[index].subnets.len();
         if count > 0 && !recursive {
             return Err(ObeliskdError::Conflict(format!(
@@ -415,6 +415,12 @@ impl Store {
         self.commit(&mut config, next);
         tracing::info!(
             subnets = removed.subnets.len(),
+            hosts = removed
+                .subnets
+                .iter()
+                .flat_map(|s| &s.ips)
+                .map(|i| i.hosts.len())
+                .sum::<usize>(),
             "deallocated supernet {} ({})",
             removed.name,
             removed.cidr
@@ -447,9 +453,6 @@ impl Store {
             .position(|s| &s.name == name)
             .ok_or_else(|| ObeliskdError::NotFound(format!("no subnet {supernet}/{name}")))?;
         let count = parent.subnets[index].ips.len();
-        config.refuse_if_hosts(&format!("subnet {supernet}/{name}"), |h| {
-            &h.supernet == supernet && &h.subnet == name
-        })?;
         if count > 0 && !recursive {
             return Err(ObeliskdError::Conflict(format!(
                 "subnet {supernet}/{name} still has {count} ip{}; dealloc them first, or use --recursive",
@@ -465,6 +468,7 @@ impl Store {
         self.commit(&mut config, next);
         tracing::info!(
             ips = removed.ips.len(),
+            hosts = removed.ips.iter().map(|i| i.hosts.len()).sum::<usize>(),
             "deallocated subnet {supernet}/{} ({})",
             removed.name,
             removed.cidr
@@ -597,23 +601,28 @@ impl Store {
         })
     }
 
-    /// Frees an ip (its address can be handed out again), and saves.
+    /// Frees an ip (its address can be handed out again), and saves. With `recursive`, the hosts
+    /// pointing at it go too; without, it must have none.
     ///
     /// # Errors
     ///
-    /// [`ObeliskdError::NotFound`] if it (or its supernet/subnet) doesn't exist; or an OS/save
-    /// failure (then nothing changes).
+    /// [`ObeliskdError::NotFound`] if it (or its supernet/subnet) doesn't exist;
+    /// [`ObeliskdError::Conflict`] if it has hosts and `recursive` is off; or an OS/save failure
+    /// (then nothing changes).
     pub async fn dealloc_ip(
         &self,
         supernet: &Name,
         subnet: &Name,
         name: &Name,
+        recursive: bool,
     ) -> Result<IpIn, ObeliskdError> {
         let mut config = self.config.lock().await;
         let mut next = config.clone();
-        config.refuse_if_hosts(&format!("ip {supernet}/{subnet}/{name}"), |h| {
-            h.targets(supernet, subnet, name)
-        })?;
+        if !recursive {
+            config.refuse_if_hosts(&format!("ip {supernet}/{subnet}/{name}"), |h| {
+                h.targets(supernet, subnet, name)
+            })?;
+        }
         let parent = find_subnet(&mut next, supernet, subnet)?;
         let index = parent
             .ips
@@ -626,6 +635,7 @@ impl Store {
         files::persist(&self.dir, &config, &next)?;
         self.commit(&mut config, next);
         tracing::info!(
+            hosts = removed.hosts.len(),
             "deallocated ip {supernet}/{subnet}/{} ({})",
             removed.name,
             removed.address
@@ -1272,7 +1282,10 @@ mod tests {
         assert!(matches!(taken, Err(ObeliskdError::Conflict(_))));
 
         // Freed addresses are handed out again, lowest first.
-        store.dealloc_ip(&obd, &host, &name("db")).await.unwrap();
+        store
+            .dealloc_ip(&obd, &host, &name("db"), false)
+            .await
+            .unwrap();
         let again = store
             .alloc_ip(&obd, &host, name("cache"), None)
             .await
@@ -1451,42 +1464,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ips_with_hosts_cant_be_removed_by_any_route() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = load(dir.path());
-        with_ip(&store).await;
-        store.alloc_host(host("app.obd.internal")).await.unwrap();
-        let (obd, host_subnet) = (name("obd"), name("host"));
+    async fn recursive_deallocs_take_hosts_along() {
+        type Dealloc =
+            fn(&Store) -> std::pin::Pin<Box<dyn Future<Output = Result<(), ObeliskdError>> + '_>>;
+        let levels: [(&str, Dealloc, Dealloc); 3] = [
+            (
+                "ip",
+                |s| {
+                    Box::pin(async {
+                        s.dealloc_ip(&name("obd"), &name("host"), &name("web"), false)
+                            .await
+                            .map(|_| ())
+                    })
+                },
+                |s| {
+                    Box::pin(async {
+                        s.dealloc_ip(&name("obd"), &name("host"), &name("web"), true)
+                            .await
+                            .map(|_| ())
+                    })
+                },
+            ),
+            (
+                "subnet",
+                |s| {
+                    Box::pin(async {
+                        s.dealloc_subnet(&name("obd"), &name("host"), false)
+                            .await
+                            .map(|_| ())
+                    })
+                },
+                |s| {
+                    Box::pin(async {
+                        s.dealloc_subnet(&name("obd"), &name("host"), true)
+                            .await
+                            .map(|_| ())
+                    })
+                },
+            ),
+            (
+                "supernet",
+                |s| Box::pin(async { s.dealloc_supernet(&name("obd"), false).await.map(|_| ()) }),
+                |s| Box::pin(async { s.dealloc_supernet(&name("obd"), true).await.map(|_| ()) }),
+            ),
+        ];
+        for (level, plain, recursive) in levels {
+            let dir = tempfile::tempdir().unwrap();
+            let store = load(dir.path());
+            with_ip(&store).await;
+            store.alloc_host(host("app.obd.internal")).await.unwrap();
+            let table = store.host_table();
 
-        for refused in [
-            store
-                .dealloc_ip(&obd, &host_subnet, &name("web"))
-                .await
-                .map(|_| ()),
-            store
-                .dealloc_subnet(&obd, &host_subnet, true)
-                .await
-                .map(|_| ()),
-            store.dealloc_supernet(&obd, true).await.map(|_| ()),
-        ] {
-            let error = refused.unwrap_err();
-            assert!(matches!(error, ObeliskdError::Conflict(_)), "{error}");
+            let error = plain(&store).await.unwrap_err();
             assert!(
-                error.to_string().contains("used by host app.obd.internal"),
-                "{error}"
+                matches!(error, ObeliskdError::Conflict(_)),
+                "{level}: {error}"
+            );
+            assert!(
+                error.to_string().contains("--recursive"),
+                "{level}: {error}"
+            );
+            assert_eq!(store.hosts().await.len(), 1, "{level}: nothing changed");
+
+            recursive(&store).await.unwrap();
+            assert!(store.hosts().await.is_empty(), "{level}: the host went too");
+            assert!(
+                table.read().unwrap().lookup("app.obd.internal").is_none(),
+                "{level}: DNS forgot it"
+            );
+            assert!(
+                load(dir.path()).hosts().await.is_empty(),
+                "{level}: persisted"
             );
         }
-        assert_eq!(
-            store.ips(None, None).await.unwrap().len(),
-            1,
-            "nothing changed"
-        );
-
-        store
-            .dealloc_host(&Hostname::parse("app.obd.internal").unwrap())
-            .await
-            .unwrap();
-        store.dealloc_supernet(&obd, true).await.unwrap();
     }
 
     #[tokio::test]

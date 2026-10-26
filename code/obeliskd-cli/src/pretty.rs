@@ -174,6 +174,7 @@ pub fn supernet_deallocated(supernet: &SupernetNode) -> String {
         );
         for ip in subnet.ips.as_deref().unwrap_or_default() {
             let _ = writeln!(out, "  and its ip {path}/{} ({})", ip.name, ip.address);
+            write_hosts(&mut out, ip);
         }
     }
     out
@@ -211,6 +212,7 @@ pub fn subnet_deallocated(supernet: &SupernetNode) -> String {
     );
     for ip in subnet.ips.as_deref().unwrap_or_default() {
         let _ = writeln!(out, "  and its ip {path}/{} ({})", ip.name, ip.address);
+        write_hosts(&mut out, ip);
     }
     out
 }
@@ -220,7 +222,18 @@ pub fn ip_allocated(supernet: &SupernetNode) -> String {
 }
 
 pub fn ip_deallocated(supernet: &SupernetNode) -> String {
-    ip_change("deallocated", supernet)
+    let mut out = ip_change("deallocated", supernet);
+    if let Some((_, ip)) = only_ip(supernet) {
+        write_hosts(&mut out, ip);
+    }
+    out
+}
+
+/// "  and its host …" for each host that went along with `ip`.
+fn write_hosts(out: &mut String, ip: &IpNode) {
+    for host in ip.hosts.as_deref().unwrap_or_default() {
+        let _ = writeln!(out, "  and its host {host}");
+    }
 }
 
 fn ip_change(verb: &str, supernet: &SupernetNode) -> String {
@@ -405,6 +418,25 @@ mod tests {
                 subnets: Some(Vec::new()),
             },
         ]
+    }
+
+    #[test]
+    fn deallocs_list_what_went_along() {
+        let removed = SupernetNode {
+            subnets: Some(vec![SubnetNode {
+                ips: Some(vec![ip("db-2", "10.57.0.2", &["a.obd.internal"])]),
+                ..tree()[0].subnets.as_ref().unwrap()[0].clone()
+            }]),
+            ..tree()[0].clone()
+        };
+        assert_eq!(
+            ip_deallocated(&removed),
+            "deallocated ip ex1/1/db-2 = 10.57.0.2 (tag pr-42)\n  and its host a.obd.internal\n"
+        );
+        assert_eq!(
+            subnet_deallocated(&removed),
+            "deallocated host subnet ex1/1 (10.57.0.0/24)\n  and its ip ex1/1/db-2 (10.57.0.2)\n  and its host a.obd.internal\n"
+        );
     }
 
     #[test]
