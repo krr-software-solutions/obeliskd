@@ -152,6 +152,19 @@ enum SubnetCommand {
         #[command(flatten)]
         output: Output,
     },
+    /// An overview of each subnet: sizes, Docker's slice, its ips, and a grid of which are taken
+    Status {
+        /// Only this supernet's subnets
+        #[arg(long)]
+        supernet: Option<Name>,
+        /// Only this subnet (needs --supernet)
+        #[arg(long, requires = "supernet")]
+        subnet: Option<Name>,
+        /// The grid's block size, as a prefix length (default: the subnet's + 8, i.e. one ip per
+        /// block for a /24)
+        #[arg(long, value_name = "PREFIX-LENGTH")]
+        block_size: Option<u8>,
+    },
     /// Carve the first free range of a size out of a supernet (needs manage on the supernet)
     Alloc {
         /// The supernet to carve it from
@@ -707,11 +720,33 @@ async fn command_supernet_status(
         ..IpQuery::default()
     };
     let tree = ControlClient::new(socket)?.ips(&query).await?;
-    let color = std::io::IsTerminal::is_terminal(&std::io::stdout())
-        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
-    let out = status::render(&tree, block_size, color).map_err(ObeliskdError::Invalid)?;
+    let out = status::render(&tree, block_size, use_color()).map_err(ObeliskdError::Invalid)?;
     print!("{out}");
     Ok(())
+}
+
+async fn command_subnet_status(
+    socket: &Path,
+    supernet: Option<Name>,
+    subnet: Option<Name>,
+    block_size: Option<u8>,
+) -> Result<(), ObeliskdError> {
+    let query = IpQuery {
+        supernet,
+        subnet,
+        ..IpQuery::default()
+    };
+    let tree = ControlClient::new(socket)?.ips(&query).await?;
+    let out =
+        status::render_subnets(&tree, block_size, use_color()).map_err(ObeliskdError::Invalid)?;
+    print!("{out}");
+    Ok(())
+}
+
+/// Colour only on a terminal, and never with `NO_COLOR` set.
+fn use_color() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
 }
 
 async fn run_supernet(socket: &Path, command: SupernetCommand) -> Result<(), ObeliskdError> {
@@ -739,6 +774,11 @@ async fn run_subnet(socket: &Path, command: SubnetCommand) -> Result<(), Obelisk
         SubnetCommand::List { supernet, output } => {
             command_subnet_list(socket, supernet, &output).await
         }
+        SubnetCommand::Status {
+            supernet,
+            subnet,
+            block_size,
+        } => command_subnet_status(socket, supernet, subnet, block_size).await,
         SubnetCommand::Alloc {
             supernet,
             subnet,

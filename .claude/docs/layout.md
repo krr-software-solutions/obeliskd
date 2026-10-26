@@ -86,6 +86,14 @@ numbered smallest subnet first so the small ones get the short numbers, and show
 column. An alias that still doesn't fit isn't drawn. "Usable" counts come from `model::ip::allocatable_count`, so
 they match what `ip alloc` hands out. Off a terminal, or with `NO_COLOR`, cells are characters.
 
+`subnet status [--supernet … [--subnet …]] [--block-size <prefix>]` is the same for subnets (every
+subnet by default): its size, usable and allocated counts, Docker's slice and gateway, a table of
+its ips (alias, address, tag, host count), and a grid whose items are its ips (default block: the
+subnet's prefix + 8, so one ip per cell for a /24). Its grid also shows Docker's slice (blue) and
+blocks with nothing obeliskd would ever hand out (grey). Such addresses (`.0`/`.255`, a docker
+subnet's network and broadcast) only count when a block holds nothing else, so they don't turn
+every edge block mixed. Both commands share one grid engine (`status::Space`).
+
 `ip resolve --supernet … --subnet … --ip …` is for scripts (`GET /ips/{supernet}/{subnet}/{ip}`,
 open to anyone). It has its own `--format simple|json` (default `simple`: just the address) and
 exit codes: **0** found, **1** not found (the supernet, subnet or ip; `simple` prints nothing, `json`
