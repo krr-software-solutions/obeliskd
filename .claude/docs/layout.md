@@ -100,8 +100,10 @@ exit codes: **0** found, **1** not found (the supernet, subnet or ip; `simple` p
 prints `null`), **2** any other error, on stderr. `host resolve --host <name>` is the same for a
 name, answered exactly as DNS would (wildcards included; `GET /resolve/{name}`). Its `json` adds
 `match: { host, shadowed }`: the host that answered, and the other hosts that match the name but
-lose to it, best first (`HostTable::matching`). Commands that need other formats get their own
-`--format` enum like these rather than sharing `Output`.
+lose to it, best first (`HostTable::matching`). `ip alloc` and `host alloc` likewise have their own
+`--format simple|pretty|json` (default `simple`: just the allocated ip's address, so
+`addr=$(obeliskd ip alloc …)` works). Commands that need other formats get their own `--format` enum
+like these rather than sharing `Output`.
 
 Ip names are unique within their subnet. An ip may carry **one optional `tag`** (`ip alloc --tag
 pr-42`, name rules): a group label, a sort of "sub-sub-net", so a set of ips can be found together
@@ -190,7 +192,7 @@ To add an endpoint, add its types to `api.rs`, a handler and route in `server.rs
 `client.rs`. Domain errors map to statuses in `From<ObeliskdError> for ApiError`: `Invalid` → 400,
 `Forbidden` → 403, `NotFound` → 404, `Conflict` → 409, everything else 500.
 
-Every CLI command that talks to the daemon takes `--format pretty|json` (default `pretty`). JSON is
+Every other CLI command that talks to the daemon takes `--format pretty|json` (default `pretty`). JSON is
 the API type as-is, and pretty-printing lives in `obeliskd-cli/src/pretty.rs`.
 **Responses are trees.** Every list and every change returns supernets with their `subnets[]`,
 `ips[]` and `hosts[]` nested (`SupernetNode` → `SubnetNode` → `IpNode`, in `api.rs`):

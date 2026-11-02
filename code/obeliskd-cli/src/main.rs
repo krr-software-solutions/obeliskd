@@ -6,7 +6,7 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
 use obeliskd::control::api::{
     GrantAdd, GrantCheckQuery, GrantQuery, HostAlloc, IpAlloc, IpDealloc, IpDeallocTagged, IpQuery,
-    SubnetAlloc, SubnetDealloc, SubnetQuery, SupernetAlloc, SupernetDealloc, WhoArg,
+    SubnetAlloc, SubnetDealloc, SubnetQuery, SupernetAlloc, SupernetDealloc, SupernetNode, WhoArg,
 };
 use obeliskd::control::client::ControlClient;
 use obeliskd::manage::{DaemonSettings, ServiceAction};
@@ -247,7 +247,7 @@ enum HostCommand {
         #[arg(long)]
         ip: Name,
         #[command(flatten)]
-        output: Output,
+        output: AllocOutput,
     },
     /// Remove a hostname (needs use on its subnet)
     Dealloc {
@@ -305,7 +305,7 @@ enum IpCommand {
         #[arg(long)]
         tag: Option<Name>,
         #[command(flatten)]
-        output: Output,
+        output: AllocOutput,
     },
     /// Free an ip, or every ip with a tag; their addresses can be handed out again (needs use on
     /// each subnet)
@@ -553,6 +553,38 @@ enum ResolveFormat {
     Json,
 }
 
+/// The `alloc` commands' own `--format`: `simple` by default, so a script can take the address.
+#[derive(Debug, Args)]
+#[command(next_help_heading = EXTRA)]
+struct AllocOutput {
+    /// Output format
+    #[arg(long, value_enum, default_value_t = AllocFormat::Simple)]
+    format: AllocFormat,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AllocFormat {
+    /// Just the allocated ip's address
+    Simple,
+    /// A sentence: what was allocated, and its address
+    Pretty,
+    /// The path to what changed, as `ip list --format json` shows it
+    Json,
+}
+
+impl AllocOutput {
+    fn print(&self, value: &SupernetNode, pretty: impl FnOnce(&SupernetNode) -> String) {
+        match self.format {
+            AllocFormat::Simple => print!("{}", pretty::address(value)),
+            AllocFormat::Pretty => print!("{}", pretty(value)),
+            AllocFormat::Json => {
+                let json = serde_json::to_string_pretty(value).expect("API types serialize");
+                println!("{json}");
+            }
+        }
+    }
+}
+
 impl Output {
     fn print<T: Serialize>(&self, value: &T, pretty: impl FnOnce(&T) -> String) {
         match self.format {
@@ -662,7 +694,7 @@ async fn command_ip_list(
 async fn command_ip_alloc(
     socket: &Path,
     request: IpAlloc,
-    output: &Output,
+    output: &AllocOutput,
 ) -> Result<(), ObeliskdError> {
     let ip = ControlClient::new(socket)?.alloc_ip(&request).await?;
     output.print(&ip, pretty::ip_allocated);
@@ -705,7 +737,7 @@ async fn command_host_list(socket: &Path, output: &Output) -> Result<(), Obelisk
 async fn command_host_alloc(
     socket: &Path,
     request: HostAlloc,
-    output: &Output,
+    output: &AllocOutput,
 ) -> Result<(), ObeliskdError> {
     let host = ControlClient::new(socket)?.alloc_host(&request).await?;
     output.print(&host, pretty::host_allocated);

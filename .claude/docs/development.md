@@ -16,6 +16,7 @@ cargo run -p obeliskd-cli -- --socket /tmp/o.sock subnet list
 ./target/debug/obeliskd --socket /tmp/o.sock supernet status  # sizes, subnets, and a colour grid of the space
 ./target/debug/obeliskd --socket /tmp/o.sock subnet status --supernet obd   # the same per subnet, down to its ips
 sudo ./target/debug/obeliskd --socket /tmp/o.sock ip alloc --supernet obd --subnet k3d-dev --ip ingress
+                                                              # prints just its address (--format pretty for more)
 ./target/debug/obeliskd --socket /tmp/o.sock ip list
 ./target/debug/obeliskd --socket /tmp/o.sock ip resolve --supernet obd --subnet k3d-dev --ip ingress
                                                               # just the address; exit 1 if there's none

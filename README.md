@@ -173,7 +173,8 @@ obeliskd supernet status   # what's allocated, as a grid
 obeliskd subnet status     # the same, per subnet, down to the ips
 ```
 
-Every command takes `--help`, and `--format json` where its output is data.
+Every command takes `--help`, and `--format json` where its output is data. `ip alloc` and `host alloc`
+print just the address by default (`--format pretty` for a sentence).
 
 ## Development
 
