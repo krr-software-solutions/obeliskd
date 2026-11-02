@@ -683,12 +683,14 @@ impl Store {
     }
 
     /// Gives `name` the lowest free address in the subnet, makes it usable on the OS, and saves.
+    /// `idempotent`: if `name` already exists with the same tag, makes sure it's usable on the OS
+    /// and returns it, saving nothing.
     ///
     /// # Errors
     ///
     /// [`ObeliskdError::NotFound`] for an unknown supernet or subnet; [`ObeliskdError::Conflict`]
-    /// if the name is taken in that subnet or it's full; or an OS/save failure (then nothing
-    /// changes).
+    /// if the name is taken in that subnet (`idempotent`: with another tag) or it's full; or an
+    /// OS/save failure (then nothing changes).
     pub async fn alloc_ip(
         &self,
         actor: &Actor,
@@ -696,15 +698,33 @@ impl Store {
         subnet: &Name,
         name: Name,
         tag: Option<Name>,
+        idempotent: bool,
     ) -> Result<IpIn, ObeliskdError> {
         let mut config = self.config.lock().await;
         config.require(actor, &subnet_scope(supernet, subnet), Role::Use)?;
         let mut next = config.clone();
         let parent = find_subnet(&mut next, supernet, subnet)?;
-        if parent.ips.iter().any(|ip| ip.name == name) {
-            return Err(ObeliskdError::Conflict(format!(
-                "ip {supernet}/{subnet}/{name} already exists"
-            )));
+        if let Some(existing) = parent.ips.iter().find(|ip| ip.name == name) {
+            if !idempotent {
+                return Err(ObeliskdError::Conflict(format!(
+                    "ip {supernet}/{subnet}/{name} already exists"
+                )));
+            }
+            if existing.tag != tag {
+                return Err(ObeliskdError::Conflict(format!(
+                    "ip {supernet}/{subnet}/{name} already exists with {} (asked for {})",
+                    tag_text(existing.tag.as_ref()),
+                    tag_text(tag.as_ref())
+                )));
+            }
+            // Nothing to save, but make sure the OS still has it: that's what a re-run is for.
+            self.os.ensure_ip(parent, existing)?;
+            return Ok(IpIn {
+                supernet: supernet.clone(),
+                subnet: subnet.clone(),
+                kind: parent.kind,
+                ip: existing.clone(),
+            });
         }
         let address = ip::pick(parent).ok_or_else(|| {
             ObeliskdError::Conflict(format!("subnet {supernet}/{subnet} is full"))
@@ -897,6 +917,17 @@ pub struct Resolved {
     pub shadowed: Vec<Hostname>,
 }
 
+/// What [`Store::alloc_host`] does when the hostname is already taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IfExists {
+    /// Conflict, whatever ip it points at.
+    Fail,
+    /// Return it if it already points at the ip; conflict if it points at another.
+    Reuse,
+    /// As `Reuse`, but move it from another ip instead of conflicting.
+    Overwrite,
+}
+
 /// A host, with the address it currently resolves to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostIn {
@@ -970,41 +1001,89 @@ impl Store {
     }
 
     /// Points a hostname at an ip (it's saved on the ip, in its subnet's file), and saves. DNS
-    /// answers with it right away.
+    /// answers with it right away. `if_exists` says what to do when the hostname is already taken.
     ///
     /// # Errors
     ///
-    /// [`ObeliskdError::Conflict`] if the hostname is taken (by any ip); [`ObeliskdError::NotFound`]
-    /// if the ip doesn't exist; or a failure to save (then nothing changes).
-    pub async fn alloc_host(&self, actor: &Actor, host: Host) -> Result<HostIn, ObeliskdError> {
+    /// [`ObeliskdError::NotFound`] if the ip doesn't exist (checked first, whatever the host is
+    /// doing); [`ObeliskdError::Conflict`] if the hostname is taken, unless `if_exists` allows it;
+    /// [`ObeliskdError::Forbidden`] if overwriting needs use on the subnet the host is moving from
+    /// too; or a failure to save (then nothing changes).
+    ///
+    /// # Panics
+    ///
+    /// Never: both ips were just found.
+    pub async fn alloc_host(
+        &self,
+        actor: &Actor,
+        host: Host,
+        if_exists: IfExists,
+    ) -> Result<HostIn, ObeliskdError> {
         let mut config = self.config.lock().await;
         config.require(
             actor,
             &subnet_scope(&host.supernet, &host.subnet),
             Role::Use,
         )?;
-        if let Some((taken, _)) = config.hosts().find(|(h, _)| h.name == host.name) {
-            return Err(ObeliskdError::Conflict(format!(
-                "host {} already points at ip {}/{}/{}",
-                host.name, taken.supernet, taken.subnet, taken.ip
+        let mut next = config.clone();
+        if next
+            .ip_mut(&host.supernet, &host.subnet, &host.ip)
+            .is_none()
+        {
+            return Err(ObeliskdError::NotFound(format!(
+                "no ip {}/{}/{}",
+                host.supernet, host.subnet, host.ip
             )));
         }
-        let mut next = config.clone();
+        let mut moved_from = None;
+        if let Some((taken, address)) = config.hosts().find(|(h, _)| h.name == host.name) {
+            let same = taken.targets(&host.supernet, &host.subnet, &host.ip);
+            match (if_exists, same) {
+                (IfExists::Reuse | IfExists::Overwrite, true) => {
+                    return Ok(HostIn {
+                        host: taken,
+                        address,
+                    });
+                }
+                (IfExists::Overwrite, false) => {
+                    config.require(
+                        actor,
+                        &subnet_scope(&taken.supernet, &taken.subnet),
+                        Role::Use,
+                    )?;
+                    next.ip_mut(&taken.supernet, &taken.subnet, &taken.ip)
+                        .expect("the host was found on this ip")
+                        .hosts
+                        .retain(|h| h != &host.name);
+                    moved_from = Some(taken);
+                }
+                (IfExists::Fail, _) | (IfExists::Reuse, false) => {
+                    return Err(ObeliskdError::Conflict(format!(
+                        "host {} already points at ip {}/{}/{}",
+                        host.name, taken.supernet, taken.subnet, taken.ip
+                    )));
+                }
+            }
+        }
         let ip = next
             .ip_mut(&host.supernet, &host.subnet, &host.ip)
-            .ok_or_else(|| {
-                ObeliskdError::NotFound(format!(
-                    "no ip {}/{}/{}",
-                    host.supernet, host.subnet, host.ip
-                ))
-            })?;
+            .expect("the ip was checked above");
         ip.hosts.push(host.name.clone());
         ip.hosts.sort();
         let address = ip.address;
         files::persist(&self.dir, &config, &next)?;
         self.commit(&mut config, next);
+        let verb = moved_from.map_or_else(
+            || "allocated".to_string(),
+            |from| {
+                format!(
+                    "moved (from ip {}/{}/{})",
+                    from.supernet, from.subnet, from.ip
+                )
+            },
+        );
         tracing::info!(
-            "allocated host {} → ip {}/{}/{} ({address})",
+            "{verb} host {} → ip {}/{}/{} ({address})",
             host.name,
             host.supernet,
             host.subnet,
@@ -1183,6 +1262,11 @@ impl Store {
 
 fn subnet_scope(supernet: &Name, subnet: &Name) -> Scope {
     Scope::Subnet(supernet.clone(), subnet.clone())
+}
+
+/// How a conflict message names an ip's tag.
+fn tag_text(tag: Option<&Name>) -> String {
+    tag.map_or_else(|| "no tag".to_string(), |t| format!("tag {t}"))
 }
 
 fn find_subnet<'a>(
@@ -1468,7 +1552,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
 
         store
-            .alloc_ip(&Actor::ROOT, &obd, &name("a"), name("db"), None)
+            .alloc_ip(&Actor::ROOT, &obd, &name("a"), name("db"), None, false)
             .await
             .unwrap();
         assert_eq!(
@@ -1781,7 +1865,7 @@ mod tests {
         let (host, dev) = (name("host"), name("dev"));
 
         let db = store
-            .alloc_ip(&Actor::ROOT, &obd, &host, name("db"), None)
+            .alloc_ip(&Actor::ROOT, &obd, &host, name("db"), None, false)
             .await
             .unwrap();
         assert_eq!(
@@ -1789,12 +1873,12 @@ mod tests {
             "10.57.0.1".parse::<std::net::Ipv4Addr>().unwrap()
         );
         let web = store
-            .alloc_ip(&Actor::ROOT, &obd, &host, name("web"), None)
+            .alloc_ip(&Actor::ROOT, &obd, &host, name("web"), None, false)
             .await
             .unwrap();
         assert_eq!(web.ip.address.to_string(), "10.57.0.2");
         let ingress = store
-            .alloc_ip(&Actor::ROOT, &obd, &dev, name("ingress"), None)
+            .alloc_ip(&Actor::ROOT, &obd, &dev, name("ingress"), None, false)
             .await
             .unwrap();
         assert_eq!(
@@ -1804,7 +1888,7 @@ mod tests {
         );
 
         let taken = store
-            .alloc_ip(&Actor::ROOT, &obd, &host, name("db"), None)
+            .alloc_ip(&Actor::ROOT, &obd, &host, name("db"), None, false)
             .await;
         assert!(matches!(taken, Err(ObeliskdError::Conflict(_))));
 
@@ -1814,7 +1898,7 @@ mod tests {
             .await
             .unwrap();
         let again = store
-            .alloc_ip(&Actor::ROOT, &obd, &host, name("cache"), None)
+            .alloc_ip(&Actor::ROOT, &obd, &host, name("cache"), None, false)
             .await
             .unwrap();
         assert_eq!(again.ip.address.to_string(), "10.57.0.1");
@@ -1852,6 +1936,7 @@ mod tests {
                 &name("host"),
                 name("db"),
                 Some(name("pr-42")),
+                false,
             )
             .await
             .unwrap();
@@ -1892,11 +1977,19 @@ mod tests {
                         &name(subnet),
                         name("db"),
                         Some(tag.clone()),
+                        false,
                     )
                     .await
                     .unwrap();
                 store
-                    .alloc_ip(&Actor::ROOT, supernet, &name(subnet), name("web"), None)
+                    .alloc_ip(
+                        &Actor::ROOT,
+                        supernet,
+                        &name(subnet),
+                        name("web"),
+                        None,
+                        false,
+                    )
                     .await
                     .unwrap();
             }
@@ -2079,7 +2172,7 @@ mod tests {
         let (obd_name, a) = (name("obd"), name("a"));
 
         let denied = store
-            .alloc_ip(&KALIN(), &obd_name, &a, name("db"), None)
+            .alloc_ip(&KALIN(), &obd_name, &a, name("db"), None, false)
             .await;
         assert!(
             matches!(&denied, Err(ObeliskdError::Forbidden(m)) if m == "uid 1000 needs use on subnet obd/a (has nothing); ask an admin of it, or use sudo"),
@@ -2092,11 +2185,15 @@ mod tests {
             .await
             .unwrap();
         store
-            .alloc_ip(&KALIN(), &obd_name, &a, name("db"), None)
+            .alloc_ip(&KALIN(), &obd_name, &a, name("db"), None, false)
             .await
             .unwrap();
         store
-            .alloc_host(&KALIN(), host_on("app.obd.internal", "a", "db"))
+            .alloc_host(
+                &KALIN(),
+                host_on("app.obd.internal", "a", "db"),
+                IfExists::Fail,
+            )
             .await
             .unwrap();
         assert!(forbidden(
@@ -2129,7 +2226,7 @@ mod tests {
 
         // Unknown places are still 404, not 403.
         let missing = store
-            .alloc_ip(&KALIN(), &obd_name, &name("zz"), name("x"), None)
+            .alloc_ip(&KALIN(), &obd_name, &name("zz"), name("x"), None, false)
             .await;
         assert!(
             matches!(missing, Err(ObeliskdError::NotFound(_))),
@@ -2221,6 +2318,7 @@ mod tests {
                     &name(subnet),
                     name("db"),
                     Some(tag.clone()),
+                    false,
                 )
                 .await
                 .unwrap();
@@ -2319,7 +2417,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .alloc_ip(&Actor::ROOT, &obd, &name("host"), name("db"), None)
+            .alloc_ip(&Actor::ROOT, &obd, &name("host"), name("db"), None, false)
             .await
             .unwrap();
 
@@ -2351,7 +2449,7 @@ mod tests {
             Err(ObeliskdError::NotFound(_))
         ));
         let missing = store
-            .alloc_ip(&Actor::ROOT, &name("x"), &name("y"), name("z"), None)
+            .alloc_ip(&Actor::ROOT, &name("x"), &name("y"), name("z"), None, false)
             .await;
         assert!(matches!(missing, Err(ObeliskdError::NotFound(_))));
     }
@@ -2373,6 +2471,7 @@ mod tests {
                 &name("host"),
                 name("web"),
                 Some(name("pr-42")),
+                false,
             )
             .await
             .unwrap();
@@ -2397,6 +2496,222 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idempotent_ip_alloc_returns_a_same_tag_ip_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, os) = load_with(dir.path());
+        with_ip(&store).await;
+        let (obd, host) = (name("obd"), name("host"));
+        let calls = os.calls().len();
+
+        let saved = std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap();
+        let again = store
+            .alloc_ip(
+                &Actor::ROOT,
+                &obd,
+                &host,
+                name("web"),
+                Some(name("pr-42")),
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(again.ip.address.to_string(), "10.57.0.1");
+        assert_eq!(
+            os.calls()[calls..],
+            ["ensure ip host/web 10.57.0.1".to_string()],
+            "only made sure of on the OS"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap(),
+            saved
+        );
+
+        let retagged = store
+            .alloc_ip(&Actor::ROOT, &obd, &host, name("web"), None, true)
+            .await;
+        assert!(
+            matches!(&retagged, Err(ObeliskdError::Conflict(m)) if m == "ip obd/host/web already exists with tag pr-42 (asked for no tag)"),
+            "{retagged:?}"
+        );
+        let plain = store
+            .alloc_ip(
+                &Actor::ROOT,
+                &obd,
+                &host,
+                name("web"),
+                Some(name("pr-42")),
+                false,
+            )
+            .await;
+        assert!(matches!(plain, Err(ObeliskdError::Conflict(_))));
+
+        let fresh = store
+            .alloc_ip(&Actor::ROOT, &obd, &host, name("db"), None, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            fresh.ip.address.to_string(),
+            "10.57.0.2",
+            "new names still allocate"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_alloc_if_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = load(dir.path());
+        with_ip(&store).await;
+        store
+            .alloc_ip(
+                &Actor::ROOT,
+                &name("obd"),
+                &name("host"),
+                name("db"),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let table = store.host_table();
+        let on_db = |h: &str| {
+            let mut host = host(h);
+            host.ip = name("db");
+            host
+        };
+
+        let created = store
+            .alloc_host(&Actor::ROOT, host("app.obd.internal"), IfExists::Reuse)
+            .await
+            .unwrap();
+        assert_eq!(created.address.to_string(), "10.57.0.1", "missing: created");
+        for if_exists in [IfExists::Reuse, IfExists::Overwrite] {
+            let same = store
+                .alloc_host(&Actor::ROOT, host("app.obd.internal"), if_exists)
+                .await
+                .unwrap();
+            assert_eq!(same, created, "same ip: returned as is");
+        }
+        for if_exists in [IfExists::Fail, IfExists::Reuse] {
+            let other = store
+                .alloc_host(&Actor::ROOT, on_db("app.obd.internal"), if_exists)
+                .await;
+            assert!(
+                matches!(&other, Err(ObeliskdError::Conflict(m)) if m == "host app.obd.internal already points at ip obd/host/web"),
+                "{other:?}"
+            );
+        }
+
+        let moved = store
+            .alloc_host(&Actor::ROOT, on_db("app.obd.internal"), IfExists::Overwrite)
+            .await
+            .unwrap();
+        assert_eq!(moved.host, on_db("app.obd.internal"));
+        assert_eq!(moved.address.to_string(), "10.57.0.2");
+        assert_eq!(
+            table
+                .read()
+                .unwrap()
+                .lookup("app.obd.internal")
+                .map(|a| a.to_string()),
+            Some("10.57.0.2".to_string()),
+            "DNS follows the move"
+        );
+        let reloaded = load(dir.path()).hosts().await;
+        assert_eq!(reloaded.len(), 1, "moved, not copied: {reloaded:?}");
+        assert_eq!(reloaded[0].host, on_db("app.obd.internal"), "persisted");
+
+        for if_exists in [IfExists::Fail, IfExists::Reuse, IfExists::Overwrite] {
+            let mut missing = host("app.obd.internal");
+            missing.ip = name("nope");
+            assert!(
+                matches!(
+                    store.alloc_host(&Actor::ROOT, missing, if_exists).await,
+                    Err(ObeliskdError::NotFound(_))
+                ),
+                "a missing ip is a 404, whatever the host is doing"
+            );
+        }
+        assert_eq!(
+            load(dir.path()).hosts().await,
+            reloaded,
+            "a failed move changes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn overwriting_a_host_needs_use_on_the_subnet_it_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = load(dir.path());
+        with_subnets(&store).await;
+        let obd_name = name("obd");
+        for subnet in ["a", "b"] {
+            store
+                .alloc_ip(
+                    &Actor::ROOT,
+                    &obd_name,
+                    &name(subnet),
+                    name("db"),
+                    None,
+                    false,
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .alloc_host(
+                &Actor::ROOT,
+                host_on("app.obd.internal", "b", "db"),
+                IfExists::Fail,
+            )
+            .await
+            .unwrap();
+        store
+            .grant(
+                &Actor::ROOT,
+                obd_a(),
+                grant(Principal::User(1000), Role::Use),
+            )
+            .await
+            .unwrap();
+
+        let denied = store
+            .alloc_host(
+                &KALIN(),
+                host_on("app.obd.internal", "a", "db"),
+                IfExists::Overwrite,
+            )
+            .await;
+        assert!(forbidden(&denied), "{denied:?}");
+        assert_eq!(
+            store.hosts().await[0].host,
+            host_on("app.obd.internal", "b", "db"),
+            "unmoved"
+        );
+
+        // Across subnets, with use on both: it leaves b's file and lands in a's.
+        store
+            .grant(&Actor::ROOT, obd(), grant(Principal::User(1000), Role::Use))
+            .await
+            .unwrap();
+        store
+            .alloc_host(
+                &KALIN(),
+                host_on("app.obd.internal", "a", "db"),
+                IfExists::Overwrite,
+            )
+            .await
+            .unwrap();
+        let reloaded = load(dir.path()).hosts().await;
+        assert_eq!(reloaded.len(), 1, "{reloaded:?}");
+        assert_eq!(reloaded[0].host, host_on("app.obd.internal", "a", "db"));
+        let file = |subnet: &str| {
+            std::fs::read_to_string(dir.path().join(format!("alloc/obd/{subnet}.toml"))).unwrap()
+        };
+        assert!(file("a").contains("app.obd.internal"), "{}", file("a"));
+        assert!(!file("b").contains("app.obd.internal"), "{}", file("b"));
+    }
+
+    #[tokio::test]
     async fn hosts_resolve_right_away_and_persist() {
         let dir = tempfile::tempdir().unwrap();
         let store = load(dir.path());
@@ -2404,12 +2719,12 @@ mod tests {
         let table = store.host_table();
 
         let app = store
-            .alloc_host(&Actor::ROOT, host("app.obd.internal"))
+            .alloc_host(&Actor::ROOT, host("app.obd.internal"), IfExists::Fail)
             .await
             .unwrap();
         assert_eq!(app.address.to_string(), "10.57.0.1");
         store
-            .alloc_host(&Actor::ROOT, host("admin.obd.internal"))
+            .alloc_host(&Actor::ROOT, host("admin.obd.internal"), IfExists::Fail)
             .await
             .unwrap();
         assert_eq!(
@@ -2423,13 +2738,15 @@ mod tests {
         );
 
         let taken = store
-            .alloc_host(&Actor::ROOT, host("app.obd.internal"))
+            .alloc_host(&Actor::ROOT, host("app.obd.internal"), IfExists::Fail)
             .await;
         assert!(matches!(taken, Err(ObeliskdError::Conflict(_))));
         let mut missing = host("x.obd.internal");
         missing.ip = name("nope");
         assert!(matches!(
-            store.alloc_host(&Actor::ROOT, missing).await,
+            store
+                .alloc_host(&Actor::ROOT, missing, IfExists::Fail)
+                .await,
             Err(ObeliskdError::NotFound(_))
         ));
 
@@ -2556,7 +2873,7 @@ mod tests {
             let store = load(dir.path());
             with_ip(&store).await;
             store
-                .alloc_host(&Actor::ROOT, host("app.obd.internal"))
+                .alloc_host(&Actor::ROOT, host("app.obd.internal"), IfExists::Fail)
                 .await
                 .unwrap();
             let table = store.host_table();

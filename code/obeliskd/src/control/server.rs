@@ -19,7 +19,7 @@ use super::api::{
 };
 use crate::model::{Actor, Grant, Host, Hostname, Principal, Scope};
 use crate::model::{Name, Supernet};
-use crate::state::{HostIn, Store};
+use crate::state::{HostIn, IfExists, Store};
 use crate::users::Users;
 use crate::{ObeliskdError, Platform, PlatformImpl};
 
@@ -351,6 +351,7 @@ async fn alloc_ip(
             &request.subnet,
             request.name,
             request.tag,
+            request.idempotent,
         )
         .await?;
     let node = IpNode::of(&ip.ip, Depth::Ips);
@@ -448,13 +449,19 @@ async fn alloc_host(
     request: Result<Json<HostAlloc>, JsonRejection>,
 ) -> Result<(StatusCode, Json<SupernetNode>), ApiError> {
     let request = json_body(request)?;
+    let if_exists = match (request.idempotent, request.overwrite) {
+        (false, false) => IfExists::Fail,
+        (true, false) => IfExists::Reuse,
+        (true, true) => IfExists::Overwrite,
+        (false, true) => return Err(ApiError::bad_request("overwrite needs idempotent")),
+    };
     let host = Host {
         name: request.name,
         supernet: request.supernet,
         subnet: request.subnet,
         ip: request.ip,
     };
-    let added = state.store.alloc_host(&actor, host).await?;
+    let added = state.store.alloc_host(&actor, host, if_exists).await?;
     let node = host_node(&added);
     Ok((
         StatusCode::CREATED,
@@ -988,6 +995,15 @@ mod tests {
                 "ips": [{ "name": "web", "address": "10.57.0.1", "hosts": ["app.obd.internal"] }] }],
         });
         assert_eq!(body, entry);
+        let mut again = request.clone();
+        again["idempotent"] = true.into();
+        let (status, body) = post_json(root(), "/hosts", again).await;
+        assert_eq!((status, body), (StatusCode::CREATED, entry.clone()));
+        let mut lone = request.clone();
+        lone["overwrite"] = true.into();
+        let (status, body) = post_json(root(), "/hosts", lone).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "overwrite needs idempotent");
 
         let stranger = Peer {
             uid: 4242,

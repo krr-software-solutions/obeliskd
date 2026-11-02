@@ -246,6 +246,14 @@ enum HostCommand {
         /// The ip it resolves to
         #[arg(long)]
         ip: Name,
+        /// If the host already points at this ip, succeed (with its address) instead of failing; a
+        /// new host is still created
+        #[arg(long)]
+        idempotent: bool,
+        /// With --idempotent: if the host points at another ip, move it to this one instead of
+        /// failing (also needs use on the other ip's subnet)
+        #[arg(long, requires = "idempotent")]
+        overwrite: bool,
         #[command(flatten)]
         output: AllocOutput,
     },
@@ -304,6 +312,10 @@ enum IpCommand {
         /// A group label, e.g. `pr-42`, to find (and later remove) a set of ips together
         #[arg(long)]
         tag: Option<Name>,
+        /// If the ip already exists with the same tag, succeed (with its address) instead of
+        /// failing; a new ip is still allocated
+        #[arg(long)]
+        idempotent: bool,
         #[command(flatten)]
         output: AllocOutput,
     },
@@ -1012,6 +1024,7 @@ async fn run_ip(socket: &Path, command: IpCommand) -> Result<(), ObeliskdError> 
             subnet,
             ip,
             tag,
+            idempotent,
             output,
         } => {
             let request = IpAlloc {
@@ -1019,6 +1032,7 @@ async fn run_ip(socket: &Path, command: IpCommand) -> Result<(), ObeliskdError> 
                 subnet,
                 name: ip,
                 tag,
+                idempotent,
             };
             command_ip_alloc(socket, request, &output).await
         }
@@ -1056,6 +1070,8 @@ async fn run_host(socket: &Path, command: HostCommand) -> Result<(), ObeliskdErr
             supernet,
             subnet,
             ip,
+            idempotent,
+            overwrite,
             output,
         } => {
             let request = HostAlloc {
@@ -1063,6 +1079,8 @@ async fn run_host(socket: &Path, command: HostCommand) -> Result<(), ObeliskdErr
                 supernet,
                 subnet,
                 ip,
+                idempotent,
+                overwrite,
             };
             command_host_alloc(socket, request, &output).await
         }
@@ -1188,6 +1206,39 @@ mod tests {
     fn parse(args: &[&str]) -> Cli {
         let matches = command().try_get_matches_from(args).unwrap();
         Cli::from_arg_matches(&matches).unwrap()
+    }
+
+    #[test]
+    fn overwrite_needs_idempotent() {
+        let host_alloc = [
+            "obeliskd",
+            "host",
+            "alloc",
+            "--host",
+            "app.obd.internal",
+            "--supernet",
+            "obd",
+            "--subnet",
+            "host",
+            "--ip",
+            "web",
+        ];
+        let lone = command().try_get_matches_from(host_alloc.iter().chain(&["--overwrite"]));
+        assert_eq!(
+            lone.unwrap_err().kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        let both = parse(&[&host_alloc[..], &["--idempotent", "--overwrite"]].concat());
+        assert!(matches!(
+            both.command,
+            Command::Host {
+                command: HostCommand::Alloc {
+                    idempotent: true,
+                    overwrite: true,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]

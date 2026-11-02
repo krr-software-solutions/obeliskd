@@ -78,9 +78,9 @@ With obeliskd that's a tag per environment:
 ```sh
 env=feat-login
 for svc in db service-1; do
-  obeliskd ip alloc --supernet obd --subnet app-1 --ip "$svc-$env" --tag "$env"
-  obeliskd host alloc --host "$svc.$env.app-1.obd.internal" --supernet obd --subnet app-1 --ip "$svc-$env"
-done
+  obeliskd ip alloc --supernet obd --subnet app-1 --ip "$svc-$env" --tag "$env" --idempotent
+  obeliskd host alloc --host "$svc.$env.app-1.obd.internal" --supernet obd --subnet app-1 --ip "$svc-$env" --idempotent
+done                                            # --idempotent: safe to re-run
 # …start each service bound to its ip, on its default port…
 obeliskd ip dealloc --tag "$env" --recursive   # gone: every ip and name in the environment
 ```

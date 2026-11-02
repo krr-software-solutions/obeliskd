@@ -101,6 +101,9 @@ pub struct IpAlloc {
     pub name: Name,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<Name>,
+    /// If the ip already exists with the same tag, return it rather than conflict.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idempotent: bool,
 }
 
 /// `GET /ips?supernet=…&subnet=…&tag=…` (`subnet` needs `supernet`). With `tag`, only that tag's
@@ -122,6 +125,12 @@ pub struct HostAlloc {
     pub supernet: Name,
     pub subnet: Name,
     pub ip: Name,
+    /// If the host already points at this ip, return it rather than conflict.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idempotent: bool,
+    /// With `idempotent`: if the host points at another ip, move it to this one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overwrite: bool,
 }
 
 /// Every response that lists or changes allocations is a tree from the supernets down: a list goes

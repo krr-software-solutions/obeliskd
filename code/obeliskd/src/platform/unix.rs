@@ -178,7 +178,7 @@ mod tests {
     use crate::control::client::ControlClient;
     use crate::control::server::{AppState, serve};
     use crate::model::{Actor, Host, Hostname, Name, SubnetKind};
-    use crate::state::Store;
+    use crate::state::{IfExists, Store};
     use crate::{Platform, PlatformImpl};
 
     #[tokio::test]
@@ -225,7 +225,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .alloc_ip(root, &obd, &name("a"), name("db"), None)
+            .alloc_ip(root, &obd, &name("a"), name("db"), None, false)
             .await
             .unwrap();
         let client = ControlClient::new(&socket).unwrap();
@@ -252,6 +252,7 @@ mod tests {
                     subnet: name("a"),
                     ip: name("db"),
                 },
+                IfExists::Fail,
             )
             .await
             .unwrap();

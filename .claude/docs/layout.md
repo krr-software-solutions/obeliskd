@@ -111,6 +111,14 @@ pr-42`, name rules): a group label, a sort of "sub-sub-net", so a set of ips can
 same tag in different subnets or supernets is one group, and `--supernet`/`--subnet` narrow it. The tag doesn't affect which address is picked.
 The `--tag` filter drops branches with no matching ips, rather than showing them as dash rows. (See the dealloc table above for `--recursive`.)
 
+**Allocating twice** is a 409 by default. With `--idempotent` (`"idempotent": true`) a repeat
+succeeds and returns what's there, saving nothing (so scripts can re-run): `ip alloc` if the ip
+exists with the same tag (another tag is still a 409; the ip is re-ensured on the OS), `host alloc`
+if the host already points at that ip (another ip is still a 409). `host alloc --idempotent
+--overwrite` instead moves a host that points at another ip; `--overwrite` alone is refused (400).
+A missing ip is a 404 before any of that. A repeat answers 201, like a first alloc. The store
+takes this as `idempotent: bool` (ips) and `IfExists` (hosts).
+
 ## The OS side (`code/obeliskd/src/os/`)
 
 The state files are the desired state; `OsEffects` makes the OS match it. Every operation is
@@ -177,7 +185,7 @@ Grants only add, and cover everything inside their scope.
 
 | Change | Needs |
 |---|---|
-| ip and host alloc/dealloc | `use` on the subnet (`ip dealloc --tag`: on every subnet it reaches) |
+| ip and host alloc/dealloc | `use` on the subnet (`ip dealloc --tag`: on every subnet it reaches; `host alloc --overwrite`: also on the one it moves from) |
 | subnet alloc/dealloc | `manage` on the supernet |
 | grant add/remove | `admin` on that scope |
 | supernet alloc/dealloc | root, always (a supernet can overlap the LAN's or a VPN's routes) |

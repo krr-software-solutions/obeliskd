@@ -141,7 +141,8 @@ impl ControlClient {
     ///
     /// # Errors
     ///
-    /// If the daemon can't be reached, or refuses (name taken, subnet full, …).
+    /// If the daemon can't be reached, or refuses (name taken, unless `idempotent` and the same tag;
+    /// subnet full; …).
     pub async fn alloc_ip(&self, request: &IpAlloc) -> Result<SupernetNode, ObeliskdError> {
         self.post("/ips", request).await
     }
@@ -242,7 +243,8 @@ impl ControlClient {
     ///
     /// # Errors
     ///
-    /// If the daemon can't be reached, or refuses (hostname taken, no such ip, …).
+    /// If the daemon can't be reached, or refuses (no such ip; hostname taken, unless `idempotent`
+    /// and on this ip, or `overwrite`; …).
     pub async fn alloc_host(&self, request: &HostAlloc) -> Result<SupernetNode, ObeliskdError> {
         self.post("/hosts", request).await
     }
