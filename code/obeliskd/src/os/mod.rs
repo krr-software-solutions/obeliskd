@@ -98,11 +98,13 @@ pub mod fake {
 
     use super::*;
 
-    /// Records what it was asked to do; can be told to fail the next call.
+    /// Records what it was asked to do; can be told to fail the next call (or, with
+    /// `fail_after`, the one after that many more succeed).
     #[derive(Default)]
     pub struct RecordingOs {
         pub calls: Mutex<Vec<String>>,
         pub fail_next: Mutex<Option<ObeliskdError>>,
+        pub fail_after: Mutex<usize>,
     }
 
     impl RecordingOs {
@@ -111,9 +113,13 @@ pub mod fake {
         }
 
         fn record(&self, call: String) -> Result<(), ObeliskdError> {
-            if let Some(error) = self.fail_next.lock().unwrap().take() {
+            let mut after = self.fail_after.lock().unwrap();
+            if *after > 0 {
+                *after -= 1;
+            } else if let Some(error) = self.fail_next.lock().unwrap().take() {
                 return Err(error);
             }
+            drop(after);
             self.calls.lock().unwrap().push(call);
             Ok(())
         }

@@ -5,21 +5,21 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use axum::serve::{IncomingStream, Listener};
 use axum::{Json, Router};
 use std::sync::Arc;
 
 use super::Peer;
 use super::api::{
-    DaemonInfo, Depth, EffectiveNode, ErrorBody, GrantAdd, GrantCheck, GrantCheckQuery, GrantNode,
-    GrantQuery, Health, HostAlloc, HostMatch, HostResolved, IpAlloc, IpDealloc, IpDeallocTagged,
-    IpNode, IpQuery, IpResolved, SubnetAlloc, SubnetDealloc, SubnetNode, SubnetQuery,
-    SupernetAlloc, SupernetDealloc, SupernetNode, Who, WhoArg,
+    BatchAlloc, DaemonInfo, Depth, EffectiveNode, ErrorBody, GrantAdd, GrantCheck, GrantCheckQuery,
+    GrantNode, GrantQuery, Health, HostAlloc, HostMatch, HostResolved, IpAlloc, IpDealloc,
+    IpDeallocTagged, IpNode, IpQuery, IpResolved, SubnetAlloc, SubnetDealloc, SubnetNode,
+    SubnetQuery, SupernetAlloc, SupernetDealloc, SupernetNode, Who, WhoArg,
 };
 use crate::model::{Actor, Grant, Host, Hostname, Principal, Scope};
 use crate::model::{Name, Supernet};
-use crate::state::{HostIn, IfExists, Store};
+use crate::state::{BatchIp, HostIn, IfExists, Store};
 use crate::users::Users;
 use crate::{ObeliskdError, Platform, PlatformImpl};
 
@@ -124,6 +124,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/hosts", get(list_hosts).post(alloc_host))
         .route("/hosts/{host}", delete(dealloc_host))
+        .route("/batch/alloc", post(alloc_batch))
         .route("/resolve/{name}", get(resolve_host))
         .route(
             "/grants",
@@ -467,6 +468,51 @@ async fn alloc_host(
         StatusCode::CREATED,
         Json(ip_path(&state, &added.host.supernet, &added.host.subnet, node).await?),
     ))
+}
+
+async fn alloc_batch(
+    actor: Actor,
+    State(state): State<AppState>,
+    request: Result<Json<BatchAlloc>, JsonRejection>,
+) -> Result<(StatusCode, Json<SupernetNode>), ApiError> {
+    let request = json_body(request)?;
+    let ips = request
+        .ips
+        .into_iter()
+        .map(|ip| BatchIp {
+            name: ip.name,
+            hosts: ip.hosts,
+        })
+        .collect();
+    let batch = state
+        .store
+        .alloc_batch(&actor, &request.supernet, &request.subnet, request.tag, ips)
+        .await?;
+    let parent = state
+        .store
+        .supernet(&request.supernet)
+        .await
+        .ok_or_else(|| ApiError::internal(format!("supernet {} vanished", request.supernet)))?;
+    let sub = parent
+        .subnets
+        .iter()
+        .find(|s| s.name == request.subnet)
+        .ok_or_else(|| {
+            ApiError::internal(format!(
+                "subnet {}/{} vanished",
+                request.supernet, request.subnet
+            ))
+        })?;
+    let node = SubnetNode {
+        ips: Some(
+            batch
+                .iter()
+                .map(|ip| IpNode::of(ip, Depth::Hosts))
+                .collect(),
+        ),
+        ..SubnetNode::of(sub, Depth::Subnets)
+    };
+    Ok((StatusCode::CREATED, Json(SupernetNode::path(&parent, node))))
 }
 
 async fn dealloc_host(
@@ -1026,6 +1072,63 @@ mod tests {
         assert_eq!((status, body), (StatusCode::OK, entry));
         let (status, _) = delete(root(), "/hosts/app.obd.internal").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn batches_over_the_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = || app(dir.path(), ROOT);
+        post_json(
+            root(),
+            "/supernets",
+            serde_json::json!({ "name": "obd", "cidr": "10.57.0.0/16" }),
+        )
+        .await;
+        post_json(
+            root(),
+            "/subnets",
+            serde_json::json!({ "supernet": "obd", "name": "host", "kind": "host", "size": 24 }),
+        )
+        .await;
+
+        let request = serde_json::json!({
+            "supernet": "obd", "subnet": "host", "tag": "pr-42",
+            "ips": [
+                { "name": "web", "hosts": ["web.obd.internal", "*.web.obd.internal"] },
+                { "name": "db" },
+            ],
+        });
+        let (status, body) = post_json(root(), "/batch/alloc", request.clone()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let entry = serde_json::json!({
+            "name": "obd", "cidr": "10.57.0.0/16",
+            "subnets": [{ "name": "host", "kind": "host", "cidr": "10.57.0.0/24", "ips": [
+                { "name": "web", "address": "10.57.0.1", "tag": "pr-42",
+                  "hosts": ["*.web.obd.internal", "web.obd.internal"] },
+                { "name": "db", "address": "10.57.0.2", "tag": "pr-42", "hosts": [] },
+            ] }],
+        });
+        assert_eq!(body, entry);
+        let (status, body) = post_json(root(), "/batch/alloc", request.clone()).await;
+        assert_eq!((status, body), (StatusCode::CREATED, entry), "a re-run");
+
+        let mut retagged = request.clone();
+        retagged["tag"] = "pr-43".into();
+        let (status, _) = post_json(root(), "/batch/alloc", retagged).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let twice = serde_json::json!({
+            "supernet": "obd", "subnet": "host",
+            "ips": [{ "name": "a" }, { "name": "a" }],
+        });
+        let (status, _) = post_json(root(), "/batch/alloc", twice).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let stranger = Peer {
+            uid: 4242,
+            gid: 4242,
+            pid: None,
+        };
+        let (status, _) = post_json(app(dir.path(), stranger), "/batch/alloc", request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

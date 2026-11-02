@@ -133,6 +133,25 @@ pub struct HostAlloc {
     pub overwrite: bool,
 }
 
+/// `POST /batch/alloc`: ips in one subnet, all with `tag`, and the hosts to point at them. All or
+/// nothing, and always idempotent (as `IpAlloc`/`HostAlloc` with `idempotent`). Answers with the
+/// subnet's path holding the batch's ips, in its order, with all their hosts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchAlloc {
+    pub supernet: Name,
+    pub subnet: Name,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Name>,
+    pub ips: Vec<BatchAllocIp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchAllocIp {
+    pub name: Name,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<Hostname>,
+}
+
 /// Every response that lists or changes allocations is a tree from the supernets down: a list goes
 /// down to its own level (`supernet list` stops at supernets, `ip list` reaches ips), and a change
 /// is the path to what changed. A level that was asked for is always present (`[]` when empty).

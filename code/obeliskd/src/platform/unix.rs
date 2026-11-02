@@ -174,27 +174,33 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
 
     use super::*;
-    use crate::control::api::DaemonInfo;
+    use crate::control::api::{BatchAlloc, BatchAllocIp, DaemonInfo};
     use crate::control::client::ControlClient;
     use crate::control::server::{AppState, serve};
-    use crate::model::{Actor, Host, Hostname, Name, SubnetKind};
+    use crate::model::{Actor, Grant, Host, Hostname, Name, Principal, Role, Scope, SubnetKind};
     use crate::state::{IfExists, Store};
     use crate::{Platform, PlatformImpl};
 
-    #[tokio::test]
-    async fn health_round_trip_over_a_real_socket() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("obeliskd.sock");
+    /// A daemon serving `dir/obeliskd.sock` (with a fake OS) until `stop` is sent.
+    struct Running {
+        socket: std::path::PathBuf,
+        daemon: DaemonInfo,
+        store: std::sync::Arc<Store>,
+        stop: tokio::sync::oneshot::Sender<()>,
+        server: tokio::task::JoinHandle<Result<(), crate::ObeliskdError>>,
+    }
+
+    fn run_daemon(dir: &Path) -> Running {
+        let socket = dir.join("obeliskd.sock");
         let daemon = DaemonInfo {
             started_at: jiff::Timestamp::now(),
             dns_address: Platform::default_dns_address(),
         };
-
         let listener = bind_control(&socket).unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let store = std::sync::Arc::new(
             Store::load(
-                dir.path(),
+                dir,
                 std::sync::Arc::new(crate::os::fake::RecordingOs::default()),
             )
             .unwrap(),
@@ -207,6 +213,25 @@ mod tests {
         let server = tokio::spawn(serve(listener, state, async {
             let _ = stopped.await;
         }));
+        Running {
+            socket,
+            daemon,
+            store,
+            stop,
+            server,
+        }
+    }
+
+    #[tokio::test]
+    async fn health_round_trip_over_a_real_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let Running {
+            socket,
+            daemon,
+            store,
+            stop,
+            server,
+        } = run_daemon(dir.path());
 
         let health = ControlClient::new(&socket).unwrap().health().await.unwrap();
         // We created the socket, so it's owned by our uid: the caller the daemon saw.
@@ -269,6 +294,77 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+
+        stop.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_round_trip_over_a_real_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let Running {
+            socket,
+            store,
+            stop,
+            server,
+            ..
+        } = run_daemon(dir.path());
+        let (root, name) = (&Actor::ROOT, |s: &str| Name::parse(s).unwrap());
+        let host = |h: &str| Hostname::parse(h).unwrap();
+        let obd = name("obd");
+        store
+            .alloc_supernet(root, obd.clone(), "10.57.0.0/16".parse().unwrap())
+            .await
+            .unwrap();
+        store
+            .alloc_subnet(root, &obd, name("a"), SubnetKind::Host, 24, None)
+            .await
+            .unwrap();
+        let client = ControlClient::new(&socket).unwrap();
+
+        // As `obeliskd batch alloc` sends it (needs use on the subnet: grant it to us).
+        let us = std::fs::metadata(&socket).unwrap().uid();
+        store
+            .grant(
+                root,
+                Scope::Subnet(obd.clone(), name("a")),
+                Grant {
+                    who: Principal::User(us),
+                    role: Role::Use,
+                },
+            )
+            .await
+            .unwrap();
+        let request = BatchAlloc {
+            supernet: obd.clone(),
+            subnet: name("a"),
+            tag: None,
+            ips: vec![
+                BatchAllocIp {
+                    name: name("db"),
+                    hosts: Vec::new(),
+                },
+                BatchAllocIp {
+                    name: name("web"),
+                    hosts: vec![host("web.obd.internal")],
+                },
+            ],
+        };
+        let answer = client.alloc_batch(&request).await.unwrap();
+        let ips: Vec<_> = answer.subnets.unwrap()[0]
+            .ips
+            .clone()
+            .unwrap()
+            .into_iter()
+            .map(|ip| (ip.name.to_string(), ip.address))
+            .collect();
+        assert_eq!(
+            ips,
+            [
+                ("db".to_string(), Ipv4Addr::new(10, 57, 0, 1)),
+                ("web".to_string(), Ipv4Addr::new(10, 57, 0, 2)),
+            ]
         );
 
         stop.send(()).unwrap();

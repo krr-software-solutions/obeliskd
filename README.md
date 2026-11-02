@@ -85,6 +85,19 @@ done                                            # --idempotent: safe to re-run
 obeliskd ip dealloc --tag "$env" --recursive   # gone: every ip and name in the environment
 ```
 
+Or all at once, from a JSON spec, getting the addresses back as JSON:
+
+```sh
+cat > "$env.json" <<EOF
+{ "ips": [
+  { "name": "db-$env",        "out": "db",        "hosts": ["db.$env.app-1.obd.internal"] },
+  { "name": "service-1-$env", "out": "service-1", "hosts": ["service-1.$env.app-1.obd.internal"] }
+] }
+EOF
+obeliskd batch alloc --supernet obd --subnet app-1 --tag "$env" --input-file "$env.json"
+# { "db": "10.57.0.1", "service-1": "10.57.0.2" }   (all or nothing, and safe to re-run)
+```
+
 More generally, running more than a toy locally means fighting the network:
 
 - **Everything wants `127.0.0.1`.** Two Postgres instances, three apps on `:8080`, a k3d cluster's

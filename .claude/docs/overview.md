@@ -9,7 +9,8 @@ understanding the wire format over pulling in a DNS framework.
 `obeliskd daemon run` answers DNS for `*.obd.internal` over UDP from its **hosts** (hostname → ip),
 and serves the control API on its socket: `GET /health`, supernets
 (`obeliskd supernet list`/`alloc`/`dealloc`), subnets (`obeliskd subnet list`/`alloc`/`dealloc`), ips
-(`obeliskd ip list`/`alloc`/`dealloc`) and hosts (`obeliskd host list`/`alloc`/`dealloc`).
+(`obeliskd ip list`/`alloc`/`dealloc`), hosts (`obeliskd host list`/`alloc`/`dealloc`), and batches
+of both (`obeliskd batch alloc`).
 Supernets and subnets are **real on the OS**:
 
 - a supernet gets a Linux `unreachable` catch-all route;

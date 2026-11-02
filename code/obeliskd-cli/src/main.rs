@@ -14,6 +14,7 @@ use obeliskd::model::{Hostname, Name, Role, SubnetKind};
 use obeliskd::{ObeliskdError, Platform, PlatformImpl};
 use serde::Serialize;
 
+mod batch;
 mod manage;
 mod pretty;
 mod status;
@@ -64,6 +65,11 @@ enum Command {
     Host {
         #[command(subcommand)]
         command: HostCommand,
+    },
+    /// Batches: many ips and hosts in one go, all or nothing
+    Batch {
+        #[command(subcommand)]
+        command: BatchCommand,
     },
     /// Grants: who may change what (a role on the whole tree, a supernet, or a subnet)
     Grant {
@@ -264,6 +270,32 @@ enum HostCommand {
         host: Hostname,
         #[command(flatten)]
         output: Output,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BatchCommand {
+    /// Allocate ips in a subnet and point hosts at them, from a JSON spec, all or nothing and
+    /// safe to re-run (as `--idempotent`); prints each address at its `out` path, as JSON (needs
+    /// use on the subnet)
+    #[command(group = clap::ArgGroup::new("spec").args(["input_file", "input"]).required(true))]
+    Alloc {
+        /// The supernet the subnet is in
+        #[arg(long)]
+        supernet: Name,
+        /// The subnet to take the addresses from
+        #[arg(long)]
+        subnet: Name,
+        /// A tag for every ip in the batch, e.g. `pr-42`
+        #[arg(long)]
+        tag: Option<Name>,
+        /// A file holding the spec: `{ "ips": [ { "name", "out", "hosts"? }, … ] }`, `out` being
+        /// where the address goes in the output (keys separated by `.`)
+        #[arg(long, value_name = "PATH")]
+        input_file: Option<PathBuf>,
+        /// The spec itself, as with --input-file
+        #[arg(long, value_name = "JSON")]
+        input: Option<String>,
     },
 }
 
@@ -1088,6 +1120,25 @@ async fn run_host(socket: &Path, command: HostCommand) -> Result<(), ObeliskdErr
     }
 }
 
+async fn run_batch(socket: &Path, command: BatchCommand) -> Result<(), ObeliskdError> {
+    match command {
+        BatchCommand::Alloc {
+            supernet,
+            subnet,
+            tag,
+            input_file,
+            input,
+        } => {
+            let input = match (&input_file, &input) {
+                (Some(path), _) => batch::Input::File(path),
+                (None, Some(json)) => batch::Input::Json(json),
+                (None, None) => unreachable!("clap requires --input-file or --input"),
+            };
+            batch::alloc(socket, supernet, subnet, tag, input).await
+        }
+    }
+}
+
 async fn run_grant(socket: &Path, command: GrantCommand) -> Result<(), ObeliskdError> {
     let client = ControlClient::new(socket)?;
     match command {
@@ -1176,6 +1227,7 @@ async fn main_impl() -> Result<ExitCode, ObeliskdError> {
         Command::Subnet { command } => run_subnet(&socket, command).await,
         Command::Ip { command } => run_ip(&socket, command).await,
         Command::Host { command } => run_host(&socket, command).await,
+        Command::Batch { command } => run_batch(&socket, command).await,
         Command::Grant { command } => run_grant(&socket, command).await,
         Command::Manage { command } => run_manage(&socket, command).await,
         Command::Completions { shell } => {

@@ -119,6 +119,20 @@ if the host already points at that ip (another ip is still a 409). `host alloc -
 A missing ip is a 404 before any of that. A repeat answers 201, like a first alloc. The store
 takes this as `idempotent: bool` (ips) and `IfExists` (hosts).
 
+**Batches** (`batch alloc`, `POST /batch/alloc`, `Store::alloc_batch`) allocate many ips in one
+subnet, all with one optional tag, and point hosts at them: **all or nothing**, saved once, and
+always idempotent (as `--idempotent`; no overwrite). The daemon checks the whole batch before it
+changes anything: an ip or host named twice is a 400; every ip with another tag and every host on
+another ip is listed in one 409; a subnet too full for the new ips is a 409. If the OS refuses an
+ip, the ips the batch created are removed again (reused ones stay). The answer is the subnet's
+path holding the batch's ips, in its order, with all their hosts.
+
+The CLI takes the batch as a JSON spec (`--input-file`, or `--input` for the JSON itself;
+`obeliskd-cli/src/batch.rs`): `{ "ips": [ { "name", "out", "hosts"? } ] }`, unknown fields refused.
+`out` is where the ip's address goes in the JSON it prints, keys separated by `.`
+(`app.db` → `{ "app": { "db": "10.57.0.1" } }`, keys sorted). Clashing `out`s (the same one twice,
+or one inside another's value) and empty keys are refused before the daemon is asked.
+
 ## The OS side (`code/obeliskd/src/os/`)
 
 The state files are the desired state; `OsEffects` makes the OS match it. Every operation is
@@ -185,7 +199,7 @@ Grants only add, and cover everything inside their scope.
 
 | Change | Needs |
 |---|---|
-| ip and host alloc/dealloc | `use` on the subnet (`ip dealloc --tag`: on every subnet it reaches; `host alloc --overwrite`: also on the one it moves from) |
+| ip and host alloc/dealloc, batch alloc | `use` on the subnet (`ip dealloc --tag`: on every subnet it reaches; `host alloc --overwrite`: also on the one it moves from) |
 | subnet alloc/dealloc | `manage` on the supernet |
 | grant add/remove | `admin` on that scope |
 | supernet alloc/dealloc | root, always (a supernet can overlap the LAN's or a VPN's routes) |

@@ -24,6 +24,8 @@ sudo ./target/debug/obeliskd --socket /tmp/o.sock host alloc --host app.obd.inte
 dig @127.0.0.79 -p 5379 +short app.obd.internal               # → the ingress ip's address
 ./target/debug/obeliskd --socket /tmp/o.sock host resolve --host app.obd.internal --format json
                                                               # the same answer, with which host matched
+./target/debug/obeliskd --socket /tmp/o.sock batch alloc --supernet obd --subnet k3d-dev --input '{"ips":[{"name":"db","out":"a.db","hosts":["db.obd.internal"]}]}'
+                                                              # → {"a":{"db":"…"}}; all or nothing, re-runnable
 sudo ./target/debug/obeliskd --socket /tmp/o.sock subnet dealloc --supernet obd --subnet k3d-dev --recursive
 #   add --log-level debug to also see every ip/docker command it runs.
 #   port 5379, not 53 (needs root) or 5353 (mDNS, already held by avahi/browsers).

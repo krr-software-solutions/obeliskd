@@ -6,8 +6,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::api::{
-    ErrorBody, GrantAdd, GrantCheck, GrantCheckQuery, GrantNode, GrantQuery, Health, HostAlloc,
-    HostResolved, IpAlloc, IpDealloc, IpDeallocTagged, IpQuery, IpResolved, SubnetAlloc,
+    BatchAlloc, ErrorBody, GrantAdd, GrantCheck, GrantCheckQuery, GrantNode, GrantQuery, Health,
+    HostAlloc, HostResolved, IpAlloc, IpDealloc, IpDeallocTagged, IpQuery, IpResolved, SubnetAlloc,
     SubnetDealloc, SubnetQuery, SupernetAlloc, SupernetDealloc, SupernetNode,
 };
 use crate::model::{Hostname, Name};
@@ -247,6 +247,16 @@ impl ControlClient {
     /// and on this ip, or `overwrite`; …).
     pub async fn alloc_host(&self, request: &HostAlloc) -> Result<SupernetNode, ObeliskdError> {
         self.post("/hosts", request).await
+    }
+
+    /// `POST /batch/alloc`
+    ///
+    /// # Errors
+    ///
+    /// If the daemon can't be reached, or refuses (an ip or host twice in the batch; ips with
+    /// another tag, or hosts on another ip, all listed; subnet too full; …). Then nothing changed.
+    pub async fn alloc_batch(&self, request: &BatchAlloc) -> Result<SupernetNode, ObeliskdError> {
+        self.post("/batch/alloc", request).await
     }
 
     /// `DELETE /hosts/{host}`

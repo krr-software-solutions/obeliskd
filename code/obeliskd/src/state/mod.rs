@@ -1128,6 +1128,164 @@ impl Store {
     }
 }
 
+/// One ip of a [`Store::alloc_batch`], with the hosts to point at it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchIp {
+    pub name: Name,
+    pub hosts: Vec<Hostname>,
+}
+
+impl Store {
+    /// Allocates a set of ips in one subnet, all with `tag`, and points hosts at them: all of it
+    /// or none of it, saved once. Always idempotent: an ip that exists with the same tag is
+    /// reused (and re-ensured on the OS), and a host that already points at its ip is kept.
+    /// Everything is checked before anything changes. Returns the batch's ips, in its order, with
+    /// all their hosts.
+    ///
+    /// # Errors
+    ///
+    /// [`ObeliskdError::Invalid`] if the batch names an ip or a host twice;
+    /// [`ObeliskdError::NotFound`] for an unknown supernet or subnet;
+    /// [`ObeliskdError::Conflict`] listing every ip that exists with another tag and every host
+    /// that points at another ip, or if the subnet is too full; or an OS/save failure (then
+    /// nothing changes).
+    ///
+    /// # Panics
+    ///
+    /// Never: each ip is in the subnet by the time its hosts are added.
+    pub async fn alloc_batch(
+        &self,
+        actor: &Actor,
+        supernet: &Name,
+        subnet: &Name,
+        tag: Option<Name>,
+        ips: Vec<BatchIp>,
+    ) -> Result<Vec<Ip>, ObeliskdError> {
+        let mut config = self.config.lock().await;
+        config.require(actor, &subnet_scope(supernet, subnet), Role::Use)?;
+        check_batch(&ips)?;
+        let mut next = config.clone();
+        let parent = find_subnet(&mut next, supernet, subnet)?;
+
+        let mut conflicts = Vec::new();
+        for ip in &ips {
+            let existing = parent.ips.iter().find(|e| e.name == ip.name);
+            if let Some(existing) = existing.filter(|e| e.tag != tag) {
+                conflicts.push(format!(
+                    "ip {supernet}/{subnet}/{} already exists with {} (asked for {})",
+                    ip.name,
+                    tag_text(existing.tag.as_ref()),
+                    tag_text(tag.as_ref())
+                ));
+            }
+        }
+        for (host, _) in config.hosts() {
+            let wanted = ips.iter().find(|ip| ip.hosts.contains(&host.name));
+            if wanted.is_some_and(|ip| !host.targets(supernet, subnet, &ip.name)) {
+                conflicts.push(format!(
+                    "host {} already points at ip {}/{}/{}",
+                    host.name, host.supernet, host.subnet, host.ip
+                ));
+            }
+        }
+        if !conflicts.is_empty() {
+            return Err(ObeliskdError::Conflict(conflicts.join("; ")));
+        }
+
+        let mut fresh = Vec::new();
+        for ip in &ips {
+            if !parent.ips.iter().any(|e| e.name == ip.name) {
+                let address = ip::pick(parent).ok_or_else(|| {
+                    ObeliskdError::Conflict(format!(
+                        "subnet {supernet}/{subnet} is too full for the batch"
+                    ))
+                })?;
+                parent.ips.push(Ip {
+                    name: ip.name.clone(),
+                    address,
+                    tag: tag.clone(),
+                    hosts: Vec::new(),
+                });
+                fresh.push(ip.name.clone());
+            }
+            let entry = parent
+                .ips
+                .iter_mut()
+                .find(|e| e.name == ip.name)
+                .expect("it was there, or was just added");
+            for host in &ip.hosts {
+                if !entry.hosts.contains(host) {
+                    entry.hosts.push(host.clone());
+                }
+            }
+            entry.hosts.sort();
+        }
+        let parent = parent.clone();
+        let batch: Vec<Ip> = ips
+            .iter()
+            .map(|ip| {
+                parent
+                    .ips
+                    .iter()
+                    .find(|e| e.name == ip.name)
+                    .expect("every batch ip is in the subnet now")
+                    .clone()
+            })
+            .collect();
+
+        // Undo only what this batch created: a reused ip was there before, and stays.
+        let undo = |ensured: &[&Ip]| {
+            for ip in ensured {
+                let _ = self.os.remove_ip(&parent, ip);
+            }
+        };
+        let mut ensured = Vec::new();
+        for ip in &batch {
+            if let Err(error) = self.os.ensure_ip(&parent, ip) {
+                undo(&ensured);
+                return Err(error);
+            }
+            if fresh.contains(&ip.name) {
+                ensured.push(ip);
+            }
+        }
+        if let Err(error) = files::persist(&self.dir, &config, &next) {
+            undo(&ensured);
+            return Err(error);
+        }
+        self.commit(&mut config, next);
+        tracing::info!(
+            tag = ?tag,
+            "allocated a batch of {} ips in {supernet}/{subnet} ({} new)",
+            batch.len(),
+            fresh.len()
+        );
+        Ok(batch)
+    }
+}
+
+/// A batch names each ip, and each host, once.
+fn check_batch(ips: &[BatchIp]) -> Result<(), ObeliskdError> {
+    let mut names = std::collections::HashSet::new();
+    let mut hosts = std::collections::HashSet::new();
+    for ip in ips {
+        if !names.insert(&ip.name) {
+            return Err(ObeliskdError::Invalid(format!(
+                "ip {} is in the batch twice",
+                ip.name
+            )));
+        }
+        for host in &ip.hosts {
+            if !hosts.insert(host) {
+                return Err(ObeliskdError::Invalid(format!(
+                    "host {host} is in the batch twice"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// What someone may do on a scope, and the grants that say so.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Effective {
@@ -2553,6 +2711,221 @@ mod tests {
             fresh.ip.address.to_string(),
             "10.57.0.2",
             "new names still allocate"
+        );
+    }
+
+    fn batch_ip(ip: &str, hosts: &[&str]) -> BatchIp {
+        BatchIp {
+            name: name(ip),
+            hosts: hosts.iter().map(|h| Hostname::parse(h).unwrap()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn batches_allocate_all_at_once_and_rerun_as_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, os) = load_with(dir.path());
+        with_ip(&store).await;
+        let (obd, host) = (name("obd"), name("host"));
+        let table = store.host_table();
+        let batch = || {
+            vec![
+                batch_ip("db", &["db.obd.internal", "*.db.obd.internal"]),
+                batch_ip("web", &["web.obd.internal"]),
+                batch_ip("cache", &[]),
+            ]
+        };
+
+        let ips = store
+            .alloc_batch(&Actor::ROOT, &obd, &host, Some(name("pr-42")), batch())
+            .await
+            .unwrap();
+        let got: Vec<_> = ips
+            .iter()
+            .map(|ip| (ip.name.to_string(), ip.address.to_string(), ip.hosts.len()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("db".to_string(), "10.57.0.2".to_string(), 2),
+                ("web".to_string(), "10.57.0.1".to_string(), 1),
+                ("cache".to_string(), "10.57.0.3".to_string(), 0),
+            ],
+            "in the batch's order; web was already there, and is reused"
+        );
+        assert!(ips.iter().all(|ip| ip.tag == Some(name("pr-42"))));
+        assert_eq!(
+            table
+                .read()
+                .unwrap()
+                .lookup("x.db.obd.internal")
+                .map(|a| a.to_string()),
+            Some("10.57.0.2".to_string()),
+            "DNS sees it without a restart"
+        );
+        assert_eq!(
+            load(dir.path())
+                .ips(Some(&obd), Some(&host))
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let saved = std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap();
+        let calls = os.calls().len();
+        let again = store
+            .alloc_batch(&Actor::ROOT, &obd, &host, Some(name("pr-42")), batch())
+            .await
+            .unwrap();
+        assert_eq!(again, ips, "a re-run answers the same");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap(),
+            saved,
+            "and saves nothing new"
+        );
+        assert!(
+            os.calls()[calls..]
+                .iter()
+                .all(|c| c.starts_with("ensure ip ")),
+            "only re-ensures: {:?}",
+            &os.calls()[calls..]
+        );
+    }
+
+    #[tokio::test]
+    async fn batches_check_everything_before_changing_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = load(dir.path());
+        with_ip(&store).await;
+        let (obd, host) = (name("obd"), name("host"));
+        store
+            .alloc_ip(
+                &Actor::ROOT,
+                &obd,
+                &host,
+                name("old"),
+                Some(name("other")),
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .alloc_host(
+                &Actor::ROOT,
+                host_on("app.obd.internal", "host", "web"),
+                IfExists::Fail,
+            )
+            .await
+            .unwrap();
+        let saved = std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap();
+        let root = Actor::ROOT;
+        let alloc = |ips| store.alloc_batch(&root, &obd, &host, Some(name("pr-42")), ips);
+
+        let twice = alloc(vec![batch_ip("a", &[]), batch_ip("a", &[])]).await;
+        assert!(
+            matches!(&twice, Err(ObeliskdError::Invalid(m)) if m == "ip a is in the batch twice"),
+            "{twice:?}"
+        );
+        let host_twice = alloc(vec![
+            batch_ip("a", &["x.obd.internal"]),
+            batch_ip("b", &["x.obd.internal"]),
+        ])
+        .await;
+        assert!(
+            matches!(&host_twice, Err(ObeliskdError::Invalid(m)) if m == "host x.obd.internal is in the batch twice"),
+            "{host_twice:?}"
+        );
+
+        let clashing = alloc(vec![
+            batch_ip("new", &["app.obd.internal"]),
+            batch_ip("old", &[]),
+            batch_ip("newer", &[]),
+        ])
+        .await;
+        assert!(
+            matches!(&clashing, Err(ObeliskdError::Conflict(m)) if m == "ip obd/host/old already exists with tag other (asked for tag pr-42); host app.obd.internal already points at ip obd/host/web"),
+            "every clash, at once: {clashing:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap(),
+            saved,
+            "nothing allocated, not even the ips that were fine"
+        );
+
+        let nowhere = store
+            .alloc_batch(
+                &Actor::ROOT,
+                &obd,
+                &name("nope"),
+                None,
+                vec![batch_ip("a", &[])],
+            )
+            .await;
+        assert!(matches!(nowhere, Err(ObeliskdError::NotFound(_))));
+        let stranger = Actor {
+            uid: 4242,
+            gids: vec![4242],
+        };
+        assert!(forbidden(
+            &store
+                .alloc_batch(&stranger, &obd, &host, None, vec![batch_ip("a", &[])])
+                .await
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_batch_the_os_refuses_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, os) = load_with(dir.path());
+        with_ip(&store).await;
+        let (obd, host) = (name("obd"), name("host"));
+        let saved = std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap();
+
+        // web (reused) and db are ensured; cache is refused.
+        *os.fail_after.lock().unwrap() = 2;
+        *os.fail_next.lock().unwrap() = Some(ObeliskdError::Os {
+            command: "ip addr add".to_string(),
+            message: "boom".to_string(),
+        });
+        let refused = store
+            .alloc_batch(
+                &Actor::ROOT,
+                &obd,
+                &host,
+                Some(name("pr-42")),
+                vec![
+                    batch_ip("web", &[]),
+                    batch_ip("db", &["db.obd.internal"]),
+                    batch_ip("cache", &[]),
+                ],
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(ObeliskdError::Os { .. })),
+            "{refused:?}"
+        );
+        let calls = os.calls();
+        assert_eq!(
+            calls[calls.len() - 3..],
+            [
+                "ensure ip host/web 10.57.0.1".to_string(),
+                "ensure ip host/db 10.57.0.2".to_string(),
+                "remove ip host/db 10.57.0.2".to_string(),
+            ],
+            "the new ip is undone; the reused one stays"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("alloc/obd/host.toml")).unwrap(),
+            saved
+        );
+        assert!(
+            store
+                .host_table()
+                .read()
+                .unwrap()
+                .lookup("db.obd.internal")
+                .is_none()
         );
     }
 
