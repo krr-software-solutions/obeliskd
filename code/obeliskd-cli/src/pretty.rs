@@ -349,18 +349,13 @@ pub fn host_deallocated(supernet: &SupernetNode) -> String {
     format!("deallocated host {host}\n")
 }
 
-/// An `alloc`'s `simple` output: just the address of the ip it allocated (or pointed a host at).
-pub fn address(supernet: &SupernetNode) -> String {
-    only_ip(supernet).map_or_else(String::new, |(_, ip)| format!("{}\n", ip.address))
-}
-
 /// A change's response is the path to what changed: its single subnet.
 fn only_subnet(supernet: &SupernetNode) -> Option<&SubnetNode> {
     supernet.subnets.as_deref()?.first()
 }
 
 /// …and, a level down, its single ip.
-fn only_ip(supernet: &SupernetNode) -> Option<(&SubnetNode, &IpNode)> {
+pub fn only_ip(supernet: &SupernetNode) -> Option<(&SubnetNode, &IpNode)> {
     let subnet = only_subnet(supernet)?;
     Some((subnet, subnet.ips.as_deref()?.first()?))
 }
@@ -499,18 +494,6 @@ mod tests {
                 subnets: Some(Vec::new()),
             },
         ]
-    }
-
-    #[test]
-    fn alloc_simple_is_just_the_address() {
-        let allocated = SupernetNode {
-            subnets: Some(vec![SubnetNode {
-                ips: Some(vec![ip("db-2", "10.57.0.2", &["a.obd.internal"])]),
-                ..tree()[0].subnets.as_ref().unwrap()[0].clone()
-            }]),
-            ..tree()[0].clone()
-        };
-        assert_eq!(address(&allocated), "10.57.0.2\n");
     }
 
     #[test]

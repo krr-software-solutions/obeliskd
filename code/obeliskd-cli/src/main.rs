@@ -562,27 +562,14 @@ struct AllocOutput {
     format: AllocFormat,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum AllocFormat {
-    /// Just the allocated ip's address
+    /// Just the address of the ip (allocated, or that the host now points at)
     Simple,
     /// A sentence: what was allocated, and its address
     Pretty,
-    /// The path to what changed, as `ip list --format json` shows it
+    /// The path to what changed, as JSON
     Json,
-}
-
-impl AllocOutput {
-    fn print(&self, value: &SupernetNode, pretty: impl FnOnce(&SupernetNode) -> String) {
-        match self.format {
-            AllocFormat::Simple => print!("{}", pretty::address(value)),
-            AllocFormat::Pretty => print!("{}", pretty(value)),
-            AllocFormat::Json => {
-                let json = serde_json::to_string_pretty(value).expect("API types serialize");
-                println!("{json}");
-            }
-        }
-    }
 }
 
 impl Output {
@@ -595,6 +582,38 @@ impl Output {
             }
         }
     }
+}
+
+impl AllocOutput {
+    /// # Errors
+    ///
+    /// `simple`, if the daemon's answer has no ip in it to print.
+    fn print(
+        &self,
+        value: &SupernetNode,
+        pretty: impl FnOnce(&SupernetNode) -> String,
+    ) -> Result<(), ObeliskdError> {
+        let format = match self.format {
+            AllocFormat::Simple => {
+                println!("{}", allocated_address(value)?);
+                return Ok(());
+            }
+            AllocFormat::Pretty => Format::Pretty,
+            AllocFormat::Json => Format::Json,
+        };
+        Output { format }.print(value, pretty);
+        Ok(())
+    }
+}
+
+/// The address in an `alloc`'s answer (the path to its one ip). Missing, it's an error rather
+/// than empty output: a script doing `addr=$(obeliskd ip alloc …)` must not get `""` and exit 0.
+fn allocated_address(supernet: &SupernetNode) -> Result<std::net::Ipv4Addr, ObeliskdError> {
+    pretty::only_ip(supernet)
+        .map(|(_, ip)| ip.address)
+        .ok_or_else(|| ObeliskdError::Generic {
+            message: "the daemon's answer has no ip in it".to_string(),
+        })
 }
 
 //
@@ -697,8 +716,7 @@ async fn command_ip_alloc(
     output: &AllocOutput,
 ) -> Result<(), ObeliskdError> {
     let ip = ControlClient::new(socket)?.alloc_ip(&request).await?;
-    output.print(&ip, pretty::ip_allocated);
-    Ok(())
+    output.print(&ip, pretty::ip_allocated)
 }
 
 async fn command_ip_dealloc(
@@ -740,8 +758,7 @@ async fn command_host_alloc(
     output: &AllocOutput,
 ) -> Result<(), ObeliskdError> {
     let host = ControlClient::new(socket)?.alloc_host(&request).await?;
-    output.print(&host, pretty::host_allocated);
-    Ok(())
+    output.print(&host, pretty::host_allocated)
 }
 
 async fn command_host_dealloc(
@@ -1161,5 +1178,94 @@ async fn main() -> ExitCode {
             eprintln!("ERROR - {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        let matches = command().try_get_matches_from(args).unwrap();
+        Cli::from_arg_matches(&matches).unwrap()
+    }
+
+    #[test]
+    fn allocs_default_to_simple() {
+        let ip = parse(&[
+            "obeliskd",
+            "ip",
+            "alloc",
+            "--supernet",
+            "obd",
+            "--subnet",
+            "host",
+            "--ip",
+            "web",
+        ]);
+        let host = parse(&[
+            "obeliskd",
+            "host",
+            "alloc",
+            "--host",
+            "app.obd.internal",
+            "--supernet",
+            "obd",
+            "--subnet",
+            "host",
+            "--ip",
+            "web",
+        ]);
+        assert!(matches!(
+            ip.command,
+            Command::Ip {
+                command: IpCommand::Alloc {
+                    output: AllocOutput {
+                        format: AllocFormat::Simple
+                    },
+                    ..
+                }
+            }
+        ));
+        assert!(matches!(
+            host.command,
+            Command::Host {
+                command: HostCommand::Alloc {
+                    output: AllocOutput {
+                        format: AllocFormat::Simple
+                    },
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn allocated_address_is_the_one_ip_or_an_error() {
+        let name = |s| Name::parse(s).unwrap();
+        let supernet = |ips| SupernetNode {
+            name: name("obd"),
+            cidr: "10.57.0.0/16".parse().unwrap(),
+            subnets: Some(vec![obeliskd::control::api::SubnetNode {
+                name: name("host"),
+                kind: SubnetKind::Host,
+                cidr: "10.57.0.0/24".parse().unwrap(),
+                docker_range: None,
+                docker_gateway: None,
+                ips,
+            }]),
+        };
+        let web = obeliskd::control::api::IpNode {
+            name: name("web"),
+            address: "10.57.0.2".parse().unwrap(),
+            tag: None,
+            hosts: Some(vec![Hostname::parse("app.obd.internal").unwrap()]),
+        };
+        assert_eq!(
+            allocated_address(&supernet(Some(vec![web]))).unwrap(),
+            std::net::Ipv4Addr::new(10, 57, 0, 2)
+        );
+        assert!(allocated_address(&supernet(Some(Vec::new()))).is_err());
+        assert!(allocated_address(&supernet(None)).is_err());
     }
 }

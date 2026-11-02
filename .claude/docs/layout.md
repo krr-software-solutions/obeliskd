@@ -192,7 +192,8 @@ To add an endpoint, add its types to `api.rs`, a handler and route in `server.rs
 `client.rs`. Domain errors map to statuses in `From<ObeliskdError> for ApiError`: `Invalid` → 400,
 `Forbidden` → 403, `NotFound` → 404, `Conflict` → 409, everything else 500.
 
-Every other CLI command that talks to the daemon takes `--format pretty|json` (default `pretty`). JSON is
+Every CLI command that talks to the daemon takes `--format pretty|json` (default `pretty`), except
+`resolve` and `alloc`, which have their own (default `simple`; see *The model and its state*). JSON is
 the API type as-is, and pretty-printing lives in `obeliskd-cli/src/pretty.rs`.
 **Responses are trees.** Every list and every change returns supernets with their `subnets[]`,
 `ips[]` and `hosts[]` nested (`SupernetNode` → `SubnetNode` → `IpNode`, in `api.rs`):
